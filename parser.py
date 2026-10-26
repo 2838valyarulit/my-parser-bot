@@ -1,11 +1,11 @@
 """OpenSooq -> Telegram (С системой паролей)."""
 import asyncio
 import json
-import loggingimport
+import logging
 import math
 import os
-import re random
-
+import random
+import re
 import shlex
 import sqlite3
 import string
@@ -183,14 +183,14 @@ def walk(value):
         yield value
         for child in value.values():
             yield from walk(child)
-    elif isinstance(value, listdef):
+    elif isinstance(value, list):
         for child in value:
             yield from walk(child)
 
 
- parsedef props(soup):
-    tag = soup.find_category("script", id="__NEXT_DATA__")
-   (raw if not tag:
+def props(soup):
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if not tag:
         return {}
 
     try:
@@ -240,7 +240,7 @@ def flight(soup):
     return result
 
 
-, url):
+def parse_category(raw, url):
     soup = BeautifulSoup(raw, "html.parser")
     data = props(soup)
     block = data.get("serpApiResponse", {}).get("listings")
@@ -1219,4 +1219,247 @@ async def handle(update, context):
 
         elif command in {"/filters", "/set"}:
             if argument:
-                state
+                state["rules"] = update_filters(
+                    state["rules"], argument
+                )
+                service.save(
+                    chat.id, rules=state["rules"]
+                )
+
+            text = "\n".join(
+                f"{key}={value}"
+                for key, value in state["rules"].items()
+            )
+            await message.reply_text(
+                "Фильтры:\n"
+                + (text or "не заданы")
+                + "\n\nВсе параметры: /help"
+            )
+
+        elif command == "/reset":
+            service.save(chat.id, rules={})
+            await message.reply_text(
+                "Фильтры сброшены."
+            )
+
+        elif command == "/sources":
+            text = "\n".join(
+                f"{index}. {url}"
+                for index, url in enumerate(state["urls"], 1)
+            )
+            await message.reply_text(
+                text[:3900]
+                or "Отправьте ссылку на категорию.",
+                disable_web_page_preview=True,
+            )
+
+        elif command == "/remove":
+            index = int(argument) - 1
+
+            if not 0 <= index < len(state["urls"]):
+                raise ValueError(
+                    "Номер отсутствует. См. /sources."
+                )
+
+            state["urls"].pop(index)
+            service.save(
+                chat.id, urls=state["urls"]
+            )
+            await message.reply_text(
+                "Категория удалена."
+            )
+
+        elif command == "/interval":
+            minutes = int(argument)
+
+            if not 5 <= minutes <= 1440:
+                raise ValueError(
+                    "Интервал: от 5 до 1440."
+                )
+
+            service.save(
+                chat.id,
+                minutes=minutes,
+                next_check=time.time() + minutes * 60,
+            )
+            await message.reply_text(
+                f"Интервал: {minutes} мин."
+            )
+
+        elif command in {"/pause", "/stop"}:
+            await service.pause(chat.id)
+            await message.reply_text(
+                "Мониторинг остановлен."
+            )
+
+        elif command == "/status":
+            enabled = (
+                "включён" if state["enabled"] else "выключен"
+            )
+            await message.reply_text(
+                f"Мониторинг: {enabled}\n"
+                f"Интервал: {state['minutes']} мин.\n"
+                f"Источников: {len(state['urls'])}\n"
+                + (state["last"] or "Проверок ещё не было.")
+            )
+
+        elif (
+            command in {"/check", "/watch", "/add"}
+            or message.text.strip().startswith(
+                ("https://", "http://")
+            )
+        ):
+            is_link = message.text.strip().startswith(
+                ("https://", "http://")
+            )
+
+            if command == "/add" or is_link:
+                url = safe_url(
+                    argument
+                    if command == "/add"
+                    else message.text.strip()
+                )
+
+                if re.search(
+                    r"/(?:search|lists)/\d+",
+                    urlsplit(url).path,
+                ):
+                    raise ValueError(
+                        "Нужна ссылка на категорию."
+                    )
+
+                if url not in state["urls"]:
+                    if len(state["urls"]) >= 5:
+                        raise ValueError(
+                            "Максимум 5 категорий."
+                        )
+
+                    state["urls"].append(url)
+                    service.save(
+                        chat.id, urls=state["urls"]
+                    )
+
+            if not state["urls"]:
+                raise ValueError(
+                    "Сначала отправьте ссылку."
+                )
+
+            if command == "/watch":
+                service.save(chat.id, enabled=1)
+
+            started = service.trigger(chat.id)
+
+            text = (
+                "Мониторинг включён.\n"
+                if command == "/watch"
+                else ""
+            )
+            text += (
+                "Проверка началась. Остановка: /pause"
+                if started
+                else "Проверка уже выполняется."
+            )
+
+            await message.reply_text(text)
+
+        else:
+            await message.reply_text(
+                "Отправьте ссылку на категорию или /help."
+            )
+
+    except ValueError as exc:
+        await message.reply_text(
+            str(exc)[:1000] or "Проверьте параметры: /help"
+        )
+
+
+def build_app(token, allowed, database):
+    async def setup(app):
+        service = Service(app.bot, allowed, database)
+        app.bot_data["service"] = service
+        app.bot_data["allowed"] = allowed
+
+        app.job_queue.run_repeating(
+            service.tick, interval=15, first=5,
+        )
+
+        await app.bot.set_my_commands([
+            BotCommand("start", "Начать"),
+            BotCommand("filters", "Фильтры"),
+            BotCommand("check", "Проверить сейчас"),
+            BotCommand("watch", "Мониторинг"),
+            BotCommand("pause", "Остановить"),
+            BotCommand("sources", "Категории"),
+            BotCommand("help", "Инструкция"),
+            BotCommand("id", "Мой Telegram ID"),
+        ])
+
+    async def cleanup(app):
+        service = app.bot_data.pop("service", None)
+        if service:
+            await service.close()
+
+    async def on_error(update, context):
+        log.error("Ошибка: %s", type(context.error).__name__)
+
+    app = (
+        Application.builder()
+        .token(token)
+        .concurrent_updates(False)
+        .post_init(setup)
+        .post_stop(cleanup)
+        .post_shutdown(cleanup)
+        .build()
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT, handle
+        )
+    )
+    app.add_error_handler(on_error)
+
+    return app
+
+
+# --- ЗАПУСК БОТА + FLASK (для Render) ---
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health():
+    return "Bot is running", 200
+
+def run_bot_thread():
+    token = os.getenv("BOT_TOKEN", "").strip()
+    admin_id_str = os.getenv("ALLOWED_TELEGRAM_IDS", "")
+    
+    # Загружаем админов
+    allowed = {
+        int(v.strip())
+        for v in admin_id_str.split(",")
+        if v.strip()
+    }
+    
+    app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
+    app.run_polling(allowed_updates=["message"])
+
+def main():
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Запускаем бота в фоновом потоке
+    threading.Thread(target=run_bot_thread, daemon=True).start()
+
+    # Запускаем Flask (чтобы Render видел порт)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Запуск Flask на порту {port}...")
+    flask_app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    main()
