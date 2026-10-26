@@ -216,7 +216,7 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # Пытаемся вытащить из JSON
+    # 1. Поиск в JSON (самый надежный, если он есть на странице)
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
@@ -233,16 +233,18 @@ def parse_profile(raw, expected_id):
     except Exception:
         pass
 
-    # Если не вышло, ищем в сыром HTML (даже если данные сгенерированы JS, иногда они есть в виде скриптов)
+    # 2. Поиск в сыром HTML (даже если данные сгенерированы JS)
     if result["seller_views"] is None:
-        m = re.search(r'"total_views"\s*:\s*(\d+)', raw) or re.search(r'"view_count"\s*:\s*(\d+)', raw)
-        if m: result["seller_views"] = count(m.group(1))
+        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?']:
+            m = re.search(pattern, raw, re.I)
+            if m: result["seller_views"] = count(m.group(1)); break
 
     if result["sold"] is None:
-        m = re.search(r'"sold_listings_count"\s*:\s*(\d+)', raw) or re.search(r'"sold"\s*:\s*(\d+)', raw)
-        if m: result["sold"] = count(m.group(1))
+        for pattern in [r'"sold_listings_count"\s*:\s*(\d+)', r'"sold"\s*:\s*(\d+)', r'Sold\s+Listings?\s*\((\d+)\)']:
+            m = re.search(pattern, raw, re.I)
+            if m: result["sold"] = count(m.group(1)); break
 
-    # Ищем в тексте
+    # 3. Поиск в тексте страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
