@@ -1,4 +1,4 @@
-"""OpenSooq -> Telegram. Python 3.11+."""
+"""OpenSooq -> Telegram (Web Service Version). Python 3.11+."""
 import asyncio
 import json
 import logging
@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import sqlite3
+import threading
 import time
 import unicodedata
 from contextlib import suppress
@@ -17,6 +18,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from flask import Flask
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, MessageHandler, filters
@@ -763,21 +765,7 @@ HELP = """Отправьте ссылку на категорию OpenSooq с о
 /filters price_max=500 currency=AED rating_min=4 photos_min=2
 /filters keywords="iphone,samsung" exclude="broken,parts"
 
-Числовые фильтры:
-price — цена
-views — просмотры объявления
-seller_views — просмотры профиля
-rating — рейтинг продавца, 0–5
-ratings — число оценок
-reviews — число текстовых отзывов
-sold — объявления с отметкой «продано»
-photos — число фото
-
-К параметру добавьте _min или _max.
-
 /filters — текущие фильтры
-/filters views_min=off — отключить границу
-/filters unknown=include — пропускать неизвестные значения
 /reset — сбросить фильтры
 /sources — категории
 /remove 1 — удалить категорию
@@ -787,8 +775,6 @@ photos — число фото
 /pause — остановить
 /status — состояние
 /id — ваш Telegram ID
-
-Отправляется первое фото; все фото открываются по кнопке.
 """
 
 
@@ -1278,142 +1264,4 @@ async def handle(update, context):
                 )
 
                 if re.search(
-                    r"/(?:search|lists)/\d+",
-                    urlsplit(url).path,
-                ):
-                    raise ValueError(
-                        "Нужна ссылка на категорию."
-                    )
-
-                if url not in state["urls"]:
-                    if len(state["urls"]) >= 5:
-                        raise ValueError(
-                            "Максимум 5 категорий."
-                        )
-
-                    state["urls"].append(url)
-                    service.save(
-                        chat.id, urls=state["urls"]
-                    )
-
-            if not state["urls"]:
-                raise ValueError(
-                    "Сначала отправьте ссылку."
-                )
-
-            if command == "/watch":
-                service.save(chat.id, enabled=1)
-
-            started = service.trigger(chat.id)
-
-            text = (
-                "Мониторинг включён.\n"
-                if command == "/watch"
-                else ""
-            )
-            text += (
-                "Проверка началась. Остановка: /pause"
-                if started
-                else "Проверка уже выполняется."
-            )
-
-            await message.reply_text(text)
-
-        else:
-            await message.reply_text(
-                "Отправьте ссылку на категорию или /help."
-            )
-
-    except ValueError as exc:
-        await message.reply_text(
-            str(exc)[:1000] or "Проверьте параметры: /help"
-        )
-
-
-def build_app(token, allowed, database):
-    async def setup(app):
-        service = Service(app.bot, allowed, database)
-        app.bot_data["service"] = service
-
-        app.job_queue.run_repeating(
-            service.tick, interval=15, first=5,
-        )
-
-        await app.bot.set_my_commands([
-            BotCommand("start", "Начать"),
-            BotCommand("filters", "Фильтры"),
-            BotCommand("check", "Проверить сейчас"),
-            BotCommand("watch", "Мониторинг"),
-            BotCommand("pause", "Остановить"),
-            BotCommand("sources", "Категории"),
-            BotCommand("help", "Инструкция"),
-            BotCommand("id", "Мой Telegram ID"),
-        ])
-
-    async def cleanup(app):
-        service = app.bot_data.pop("service", None)
-        if service:
-            await service.close()
-
-    async def on_error(update, context):
-        log.error("Ошибка: %s", type(context.error).__name__)
-
-    app = (
-        Application.builder()
-        .token(token)
-        .concurrent_updates(False)
-        .post_init(setup)
-        .post_stop(cleanup)
-        .post_shutdown(cleanup)
-        .build()
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT, handle
-        )
-    )
-    app.add_error_handler(on_error)
-
-    return app
-
-
-def main():
-    load_dotenv()
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-    token = os.getenv("BOT_TOKEN", "").strip()
-
-    if not token or ":" not in token:
-        raise SystemExit("Добавьте BOT_TOKEN в Secrets.")
-
-    try:
-        allowed = {
-            int(value.strip())
-            for value in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",")
-            if value.strip()
-        }
-        if any(value <= 0 for value in allowed):
-            raise ValueError()
-    except ValueError:
-        raise SystemExit("ALLOWED_TELEGRAM_IDS: только цифры.") from None
-
-    try:
-        app = build_app(
-            token, allowed,
-            os.getenv("DATABASE_PATH", "bot.sqlite3"),
-        )
-        app.run_polling(allowed_updates=["message"])
-
-    except TelegramError as exc:
-        raise SystemExit(f"Ошибка Telegram: {type(exc).__name__}.") from None
-
-
-if __name__ == "__main__":
-    main()
+                    r"/(?:search|lists)/\
