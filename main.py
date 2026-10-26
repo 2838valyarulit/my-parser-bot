@@ -22,9 +22,6 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Импорт для Playwright
-from playwright.async_api import async_playwright
-
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {c + ".opensooq.com" for c in COUNTRIES}
 METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "sold", "photos"}
@@ -215,37 +212,45 @@ def parse_listing(raw, ad):
     ad["time"] = time_str or "Неизвестно"
     return ad
 
-# --- ПАРСЕР ПРОФИЛЯ ЧЕРЕЗ БРАУЗЕР (PLAYWRIGHT) ---
-async def parse_profile_via_playwright(client, seller_url):
-    if not seller_url: return None
-    
+def parse_profile(raw, expected_id):
+    soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(seller_url, timeout=30000)
-            # Ждем, пока прогрузится JS и появятся слова "Views" или "Reviews"
-            await page.wait_for_timeout(3000) 
-            
-            content = await page.content()
-            soup = BeautifulSoup(content, "html.parser")
-            
-            # Ищем в тексте страницы
-            page_text = soup.get_text(" ", strip=True)
-            m_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-            if m_views: result["seller_views"] = count(m_views.group(1))
-            
-            m_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
-            if m_reviews: result["reviews"] = count(m_reviews.group(1))
-
-            m_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
-            if m_sold: result["sold"] = count(m_sold.group(1))
-            
-            await browser.close()
-    except Exception as e:
-        log.error(f"Playwright error: {e}")
     
+    try:
+        data = props(soup)
+        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
+        if isinstance(mem, dict):
+            rat = mem.get("rating") or {}
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            result["reviews"] = count(rat.get("number_of_reviews"))
+            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
+            
+            info = mem.get("member_info") or {}
+            if "sold_listings_count" in info:
+                result["sold"] = count(info["sold_listings_count"])
+    except Exception:
+        pass
+
+    for tag in soup(["script", "style"]): tag.decompose()
+    page_text = soup.get_text(" ", strip=True)
+    
+    if result["seller_views"] is None:
+        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+        if m: result["seller_views"] = count(m.group(1))
+    
+    if result["reviews"] is None:
+        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+        if m: result["reviews"] = count(m.group(1))
+    
+    if result["sold"] is None:
+        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+        if m: result["sold"] = count(m.group(1))
+
+    if result["rating"] is None:
+        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+        if m: result["rating"] = number(m.group(1))
+
     return result
 
 def update_filters(current, text):
@@ -353,14 +358,15 @@ class Reader:
             cached = self.cache.get(url)
             if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
-                # ИСПОЛЬЗУЕМ PLAYWRIGHT ЗДЕСЬ
-                profile = await parse_profile_via_playwright(self.http, url)
-                if profile:
-                    self.cache[url] = (time.monotonic() + 300, profile)
-                else:
-                    warning = "Playwright не смог прочитать профиль."
+                try:
+                    raw_prof, _ = await self.get(url)
+                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
+                except RateLimit: raise
+                except (SourceError, ValueError): profile = None
+                self.cache[url] = (time.monotonic() + 300, profile)
             
             if profile is not None: ad.update({key: value for key, value in profile.items() if value is not None})
+            else: warning = "Часть профилей недоступна."
             
         if len(self.cache) > 2000:
             self.cache = {key: value for key, value in self.cache.items() if value[0] > time.monotonic()}
