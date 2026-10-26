@@ -216,48 +216,48 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Ищем просмотры в сыром HTML с помощью регулярки (это спасает, если они спрятаны в скриптах)
-    match_views_raw = re.search(r'"views(?:_count)?"\s*:\s*(\d+)', raw)
-    if match_views_raw:
-        result["seller_views"] = count(match_views_raw.group(1))
-    
-    # 2. Ищем просмотры в видимом тексте страницы
-    for tag in soup(["script", "style"]): tag.decompose()
-    page_text = soup.get_text(" ", strip=True)
-    
-    if result["seller_views"] is None:
-        match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-        if match_views: result["seller_views"] = count(match_views.group(1))
-    
-    # 3. Ищем остальные данные (рейтинг, отзывы, продано)
-    if result["reviews"] is None:
-        match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
-        if match_reviews: result["reviews"] = count(match_reviews.group(1))
-    
-    if result["sold"] is None:
-        match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
-        if match_sold: result["sold"] = count(match_sold.group(1))
-
-    if result["rating"] is None:
-        match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
-        if match_rating: result["rating"] = number(match_rating.group(1))
-
-    # 4. Пытаемся достать из JSON
+    # 1. Попытка вытащить из JSON (самый надежный, но иногда его нет)
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
         if isinstance(mem, dict):
             rat = mem.get("rating") or {}
-            if result["rating"] is None: result["rating"] = number(rat.get("average_rating"))
-            if result["ratings"] is None: result["ratings"] = count(rat.get("number_of_rating"))
-            if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
-            if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            result["reviews"] = count(rat.get("number_of_reviews"))
+            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
             
             info = mem.get("member_info") or {}
-            if "sold_listings_count" in info and result["sold"] is None:
+            if "sold_listings_count" in info:
                 result["sold"] = count(info["sold_listings_count"])
     except Exception:
         pass
+
+    # 2. Поиск по всему сырому HTML (обходит JS-скрипты)
+    if result["seller_views"] is None:
+        # Ищем паттерн "views_count":21400 или "views": "21.4K"
+        m = re.search(r'"(?:views_count|views)"\s*:\s*"?(\d+[\d\.,]*[kKmM]?)"?', raw)
+        if m: result["seller_views"] = count(m.group(1))
+    
+    # 3. Поиск по тексту страницы (если он отрендерился)
+    for tag in soup(["script", "style"]): tag.decompose()
+    page_text = soup.get_text(" ", strip=True)
+    
+    if result["seller_views"] is None:
+        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+        if m: result["seller_views"] = count(m.group(1))
+    
+    if result["reviews"] is None:
+        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+        if m: result["reviews"] = count(m.group(1))
+    
+    if result["sold"] is None:
+        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+        if m: result["sold"] = count(m.group(1))
+
+    if result["rating"] is None:
+        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+        if m: result["rating"] = number(m.group(1))
 
     return result
 
@@ -595,6 +595,7 @@ class Service:
             
             header = "✅ <b>Вы получили все сообщения.</b>"
             
+            # Более минималистичный дизайн
             dashboard = (
                 f"📊 <b>Отчет о парсинге</b>\n\n"
                 f"✅ Найдено новых: <b>{sent}</b>\n"
