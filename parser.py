@@ -1,12 +1,14 @@
-"""OpenSooq -> Telegram (Web Service Version). Python 3.11+."""
+"""OpenSooq -> Telegram (С системой паролей)."""
 import asyncio
 import json
-import logging
+import loggingimport
 import math
 import os
-import re
+import re random
+
 import shlex
 import sqlite3
+import string
 import threading
 import time
 import unicodedata
@@ -21,7 +23,7 @@ from dotenv import load_dotenv
 from flask import Flask
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
-from telegram.ext import Application, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {
@@ -38,6 +40,37 @@ MAX_SEND = 20
 
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
+
+# ==========================================
+# ЛОГИКА ПАРОЛЕЙ
+# ==========================================
+def generate_password(length=8):
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
+def save_user_password(user_id, password):
+    data = {}
+    if os.path.exists("passwords.txt"):
+        with open("passwords.txt", "r") as f:
+            for line in f:
+                if ":" in line:
+                    uid, pwd = line.strip().split(":", 1)
+                    data[uid] = pwd
+    data[str(user_id)] = password
+    with open("passwords.txt", "w") as f:
+        for uid, pwd in data.items():
+            f.write(f"{uid}:{pwd}\n")
+
+def check_user_password(user_id, password):
+    if not os.path.exists("passwords.txt"):
+        return False
+    with open("passwords.txt", "r") as f:
+        for line in f:
+            if ":" in line:
+                uid, pwd = line.strip().split(":", 1)
+                if uid == str(user_id) and pwd == password:
+                    return True
+    return False
 
 
 class SourceError(Exception):
@@ -150,14 +183,14 @@ def walk(value):
         yield value
         for child in value.values():
             yield from walk(child)
-    elif isinstance(value, list):
+    elif isinstance(value, listdef):
         for child in value:
             yield from walk(child)
 
 
-def props(soup):
-    tag = soup.find("script", id="__NEXT_DATA__")
-    if not tag:
+ parsedef props(soup):
+    tag = soup.find_category("script", id="__NEXT_DATA__")
+   (raw if not tag:
         return {}
 
     try:
@@ -207,7 +240,7 @@ def flight(soup):
     return result
 
 
-def parse_category(raw, url):
+, url):
     soup = BeautifulSoup(raw, "html.parser")
     data = props(soup)
     block = data.get("serpApiResponse", {}).get("listings")
@@ -1144,14 +1177,38 @@ async def handle(update, context):
 
     command = parts[0].split("@")[0].lower()
     argument = parts[1] if len(parts) > 1 else ""
+    
+    admin_id = int(os.getenv("ALLOWED_TELEGRAM_IDS", "0").split(",")[0])
+
+    # Если это не команда /id и юзер не в белом списке
+    if command != "/id" and user.id not in context.application.bot_data["allowed"]:
+        # Проверяем, может он ввел пароль
+        if check_user_password(user.id, message.text.strip()):
+            context.application.bot_data["allowed"].add(user.id)
+            await message.reply_text("✅ Пароль верный! Доступ открыт. Отправь ссылку на категорию.")
+            return
+        else:
+            await message.reply_text("🔒 Бот приватный. Введи пароль для доступа:")
+            return
 
     service = context.application.bot_data["service"]
 
-    if command == "/id" or user.id not in service.allowed:
-        await message.reply_text(
-            f"Ваш Telegram ID: {user.id}\n"
-            "Добавьте его в ALLOWED_TELEGRAM_IDS."
-        )
+    # Команды админа
+    if command == "/createpass":
+        if user.id != admin_id:
+            await message.reply_text("❌ У тебя нет прав администратора.")
+            return
+        try:
+            target_id = argument.strip()
+            new_pass = generate_password()
+            save_user_password(target_id, new_pass)
+            await message.reply_text(f"✅ Пароль для ID `{target_id}` создан!\n\n🔑 Пароль: `{new_pass}`", parse_mode="Markdown")
+        except:
+            await message.reply_text("⚠️ Используй так: `/createpass 123456789`", parse_mode="Markdown")
+        return
+
+    if command == "/id":
+        await message.reply_text(f"Ваш Telegram ID: {user.id}")
         return
 
     state = service.state(chat.id)
@@ -1162,242 +1219,4 @@ async def handle(update, context):
 
         elif command in {"/filters", "/set"}:
             if argument:
-                state["rules"] = update_filters(
-                    state["rules"], argument
-                )
-                service.save(
-                    chat.id, rules=state["rules"]
-                )
-
-            text = "\n".join(
-                f"{key}={value}"
-                for key, value in state["rules"].items()
-            )
-            await message.reply_text(
-                "Фильтры:\n"
-                + (text or "не заданы")
-                + "\n\nВсе параметры: /help"
-            )
-
-        elif command == "/reset":
-            service.save(chat.id, rules={})
-            await message.reply_text(
-                "Фильтры сброшены."
-            )
-
-        elif command == "/sources":
-            text = "\n".join(
-                f"{index}. {url}"
-                for index, url in enumerate(state["urls"], 1)
-            )
-            await message.reply_text(
-                text[:3900]
-                or "Отправьте ссылку на категорию.",
-                disable_web_page_preview=True,
-            )
-
-        elif command == "/remove":
-            index = int(argument) - 1
-
-            if not 0 <= index < len(state["urls"]):
-                raise ValueError(
-                    "Номер отсутствует. См. /sources."
-                )
-
-            state["urls"].pop(index)
-            service.save(
-                chat.id, urls=state["urls"]
-            )
-            await message.reply_text(
-                "Категория удалена."
-            )
-
-        elif command == "/interval":
-            minutes = int(argument)
-
-            if not 5 <= minutes <= 1440:
-                raise ValueError(
-                    "Интервал: от 5 до 1440."
-                )
-
-            service.save(
-                chat.id,
-                minutes=minutes,
-                next_check=time.time() + minutes * 60,
-            )
-            await message.reply_text(
-                f"Интервал: {minutes} мин."
-            )
-
-        elif command in {"/pause", "/stop"}:
-            await service.pause(chat.id)
-            await message.reply_text(
-                "Мониторинг остановлен."
-            )
-
-        elif command == "/status":
-            enabled = (
-                "включён" if state["enabled"] else "выключен"
-            )
-            await message.reply_text(
-                f"Мониторинг: {enabled}\n"
-                f"Интервал: {state['minutes']} мин.\n"
-                f"Источников: {len(state['urls'])}\n"
-                + (state["last"] or "Проверок ещё не было.")
-            )
-
-        elif (
-            command in {"/check", "/watch", "/add"}
-            or message.text.strip().startswith(
-                ("https://", "http://")
-            )
-        ):
-            is_link = message.text.strip().startswith(
-                ("https://", "http://")
-            )
-
-            if command == "/add" or is_link:
-                url = safe_url(
-                    argument
-                    if command == "/add"
-                    else message.text.strip()
-                )
-
-                if re.search(
-                    r"/(?:search|lists)/\d+",
-                    urlsplit(url).path,
-                ):
-                    raise ValueError(
-                        "Нужна ссылка на категорию."
-                    )
-
-                if url not in state["urls"]:
-                    if len(state["urls"]) >= 5:
-                        raise ValueError(
-                            "Максимум 5 категорий."
-                        )
-
-                    state["urls"].append(url)
-                    service.save(
-                        chat.id, urls=state["urls"]
-                    )
-
-            if not state["urls"]:
-                raise ValueError(
-                    "Сначала отправьте ссылку."
-                )
-
-            if command == "/watch":
-                service.save(chat.id, enabled=1)
-
-            started = service.trigger(chat.id)
-
-            text = (
-                "Мониторинг включён.\n"
-                if command == "/watch"
-                else ""
-            )
-            text += (
-                "Проверка началась. Остановка: /pause"
-                if started
-                else "Проверка уже выполняется."
-            )
-
-            await message.reply_text(text)
-
-        else:
-            await message.reply_text(
-                "Отправьте ссылку на категорию или /help."
-            )
-
-    except ValueError as exc:
-        await message.reply_text(
-            str(exc)[:1000] or "Проверьте параметры: /help"
-        )
-
-
-def build_app(token, allowed, database):
-    async def setup(app):
-        service = Service(app.bot, allowed, database)
-        app.bot_data["service"] = service
-
-        app.job_queue.run_repeating(
-            service.tick, interval=15, first=5,
-        )
-
-        await app.bot.set_my_commands([
-            BotCommand("start", "Начать"),
-            BotCommand("filters", "Фильтры"),
-            BotCommand("check", "Проверить сейчас"),
-            BotCommand("watch", "Мониторинг"),
-            BotCommand("pause", "Остановить"),
-            BotCommand("sources", "Категории"),
-            BotCommand("help", "Инструкция"),
-            BotCommand("id", "Мой Telegram ID"),
-        ])
-
-    async def cleanup(app):
-        service = app.bot_data.pop("service", None)
-        if service:
-            await service.close()
-
-    async def on_error(update, context):
-        log.error("Ошибка: %s", type(context.error).__name__)
-
-    app = (
-        Application.builder()
-        .token(token)
-        .concurrent_updates(False)
-        .post_init(setup)
-        .post_stop(cleanup)
-        .post_shutdown(cleanup)
-        .build()
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT, handle
-        )
-    )
-    app.add_error_handler(on_error)
-
-    return app
-
-
-# --- ЗАПУСК БОТА + FLASK (для Render) ---
-
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def health():
-    return "Bot is running", 200
-
-def run_bot_thread():
-    token = os.getenv("BOT_TOKEN", "").strip()
-    allowed = {
-        int(v.strip())
-        for v in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",")
-        if v.strip()
-    }
-    app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
-    app.run_polling(allowed_updates=["message"])
-
-def main():
-    load_dotenv()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-    # Запускаем бота в фоновом потоке
-    threading.Thread(target=run_bot_thread, daemon=True).start()
-
-    # Запускаем Flask (чтобы Render видел порт)
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Запуск Flask на порту {port}...")
-    flask_app.run(host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
-    main()
+                state
