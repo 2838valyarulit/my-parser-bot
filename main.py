@@ -1,4 +1,3 @@
-"""OpenSooq -> Telegram (Только товары + время + просмотры)."""
 import asyncio
 import json
 import logging
@@ -30,8 +29,8 @@ MAX_PAGES, MAX_ADS, MAX_SEND = 2, 60, 20
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
 
-# Стоп-слова для категорий (чтобы бот не парсил машины, квартиры и услуги)
-EXCLUDED_TAGS = {"Cars", "Autos", "Cars For Sale", "Real Estate", "Apartments", "Services", "Delivery", "Jobs", "Rent"}
+# Стоп-слова для машин, квартир и услуг (ищем в тексте)
+EXCLUDED_WORDS = ["car", "cars", "auto", "autos", "kia", "gmc", "toyota", "nissan", "chevrolet", "ford", "bmw", "mercedes", "audi", "hyundai", "apartment", "flat", "real estate", "rent", "rental", "delivery", "service", "job", "vacancy", "سيارة", "سيارات", "شقة", "شقق", "عقار", "ايجار", "تأجير", "خدمة", "وظيفة"]
 
 def generate_password(length=8):
     chars = string.ascii_letters + string.digits
@@ -60,6 +59,22 @@ def check_user_password(user_id, password):
                 if uid == str(user_id) and pwd == password:
                     return True
     return False
+
+def is_blocked(user_id):
+    if not os.path.exists("blocked.txt"): return False
+    with open("blocked.txt", "r") as f:
+        return str(user_id) in [line.strip() for line in f]
+
+def block_user(user_id):
+    if not is_blocked(user_id):
+        with open("blocked.txt", "a") as f: f.write(f"{user_id}\n")
+
+def unblock_user(user_id):
+    if os.path.exists("blocked.txt"):
+        with open("blocked.txt", "r") as f: lines = f.readlines()
+        with open("blocked.txt", "w") as f:
+            for line in lines:
+                if line.strip() != str(user_id): f.write(line)
 
 class SourceError(Exception): pass
 class RateLimit(SourceError): pass
@@ -138,8 +153,9 @@ def parse_category(raw, url):
     for row in block["items"]:
         if (not isinstance(row, dict) or not row.get("id") or not row.get("title")): continue
         
-        tags = set(row.get("tags", []))
-        if tags & EXCLUDED_TAGS: continue
+        # Фильтр стоп-слов
+        title_lower = str(row.get("title", "")).lower()
+        if any(word in title_lower for word in EXCLUDED_WORDS): continue
 
         path = row.get("post_url") or f"/search/{row['id']}"
         if path.startswith("/search/"):
@@ -185,7 +201,7 @@ def parse_listing(raw, ad):
         ad["price"] = number(prices[0].get("price"))
         ad["currency"] = str(prices[0].get("key") or prices[0].get("currencyLabel") or ad["currency"])
 
-    # --- ВЫТАСКИВАЕМ ВРЕМЯ ПУБЛИКАЦИИ ---
+    # Время публикации
     time_str = None
     for obj in walk([data]):
         if isinstance(obj, dict):
@@ -196,16 +212,10 @@ def parse_listing(raw, ad):
                 time_str = obj["time"]
                 break
     if not time_str:
-        # Если в JSON нет, ищем в тексте ("3 minutes ago")
         text_content = soup.get_text(" ", strip=True)
-        match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|mins|دقائق|ساعات|أيام)\s+ago)", text_content, re.I)
+        match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|mins|دقائق|ساعات|أيام)\s+ago|Published\s+Date\s*[:\-]?\s*([^|]+))", text_content, re.I)
         if match_time:
-            time_str = match_time.group(1)
-        else:
-            match_time = re.search(r"(?:Created|Posted)\s+([^|]+)", text_content, re.I)
-            if match_time:
-                time_str = match_time.group(1).strip()
-                
+            time_str = (match_time.group(1) or match_time.group(2)).strip()
     ad["time"] = time_str or "Неизвестно"
 
     return ad
@@ -218,7 +228,6 @@ def parse_profile(raw, expected_id):
     rating = member.get("rating") or {}
     result = {"rating": number(rating.get("average_rating")), "ratings": count(rating.get("number_of_rating")), "reviews": count(rating.get("number_of_reviews")), "seller_views": count(member.get("views_count")), "sold": None}
     
-    # Глубокий поиск просмотров в JSON
     if result["seller_views"] is None:
         for obj in walk([data]):
             if isinstance(obj, dict):
@@ -240,7 +249,6 @@ def parse_profile(raw, expected_id):
         match_sold = re.search(r"(?:Sold\s+Listings|الإعلانات\s+المباعة|تم\s+بيعها)\s*[(（]\s*([\d.,٬٫]+\s*[kKmM]?)\s*[)）]", page_text, re.I)
         if match_sold: result["sold"] = count(match_sold.group(1))
     return result
-
 def update_filters(current, text):
     result = dict(current)
     for pair in shlex.split(text):
@@ -367,7 +375,7 @@ def card(ad):
     
     time_info = f"⏱ Опубликовано: {show('time')}\n" if ad.get('time') else ""
     
-    text = f"{ad['title'][:120]}\n💰 {show('price')} {ad.get('currency', '')}\n📷 Фото: {show('photos')}\n👁 Просмотры: {show('views')}\n{time_info}\n👤 Продавец: {ad.get('seller_name', '')[:70] or 'нет данных'}\n⭐ Рейтинг: {show('rating')}\nОценок: {show('ratings')}\nОтзывов: {show('reviews')}\nПродано: {show('sold')}\nПросмотры профиля ≈ {show('seller_views')}"
+    text = f"🛍 *{ad['title'][:100]}*\n\n💰 Цена: {show('price')} {ad.get('currency', '')}\n📷 Фото: {show('photos')}\n👁 Просмотры: {show('views')}\n{time_info}\n👤 *Продавец:* {ad.get('seller_name', '')[:50] or 'нет данных'}\n⭐ Рейтинг: {show('rating')}\nОценок: {show('ratings')}\nОтзывов: {show('reviews')}\nПродано: {show('sold')}\nПросмотры профиля ≈ {show('seller_views')}"
     return text.encode("utf-16-le")[:1990].decode("utf-16-le", errors="ignore")
 
 async def telegram_call(method, **kwargs):
@@ -378,7 +386,7 @@ async def telegram_call(method, **kwargs):
         await asyncio.sleep(float(delay) + 1)
         return await method(**kwargs)
 
-# --- КРАСИВОЕ МЕНЮ ---
+# --- МЕНЮ ---
 HELP_TEXT = """ℹ️ *Справка по командам*
 
 *Управление категориями:*
@@ -462,10 +470,10 @@ class Service:
         kwargs = {"chat_id": chat, "reply_markup": InlineKeyboardMarkup(buttons)}
         if ad.get("images"):
             try:
-                await telegram_call(self.bot.send_photo, photo=ad["images"][0], caption=card(ad), **kwargs)
+                await telegram_call(self.bot.send_photo, photo=ad["images"][0], caption=card(ad), parse_mode="Markdown", **kwargs)
                 return
             except BadRequest: pass
-        await telegram_call(self.bot.send_message, text=card(ad), **kwargs)
+        await telegram_call(self.bot.send_message, text=card(ad), parse_mode="Markdown", **kwargs)
 
     async def scan(self, chat, notify):
         checked, sent, errors, skipped = 0, 0, 0, 0
@@ -553,13 +561,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     argument = parts[1] if len(parts) > 1 else ""
     admin_id = int(os.getenv("ALLOWED_TELEGRAM_IDS", "0").split(",")[0])
     
+    if is_blocked(user.id):
+        await message.reply_text("⛔ Вы заблокированы.")
+        return
+
     if command == "/id":
         await message.reply_text(f"Ваш Telegram ID: {user.id}")
         return
     if command == "/createpass":
-        if user.id != admin_id:
-            await message.reply_text("❌ У тебя нет прав администратора.")
-            return
+        if user.id != admin_id: return
         try:
             target_id = argument.strip()
             new_pass = generate_password()
@@ -568,6 +578,27 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await message.reply_text("⚠️ Используй так: `/createpass 123456789`", parse_mode="Markdown")
         return
+    if command == "/block":
+        if user.id != admin_id: return
+        try:
+            target_id = int(argument.strip())
+            block_user(target_id)
+            await message.reply_text(f"✅ Пользователь {target_id} заблокирован!")
+        except: await message.reply_text("⚠️ Используй: `/block 123456789`")
+        return
+    if command == "/unblock":
+        if user.id != admin_id: return
+        try:
+            target_id = int(argument.strip())
+            unblock_user(target_id)
+            await message.reply_text(f"✅ Пользователь {target_id} разблокирован!")
+        except: await message.reply_text("⚠️ Используй: `/unblock 123456789`")
+        return
+    if command == "/admin":
+        if user.id != admin_id: return
+        await message.reply_text("👑 *АДМИН-ПАНЕЛЬ*\n\n🔑 `/createpass [ID]` — Создать пароль\n🚫 `/block [ID]` — Заблокировать\n✅ `/unblock [ID]` — Разблокировать\n\nℹ️ *Остальные функции доступны в меню /start*", parse_mode="Markdown")
+        return
+
     if user.id not in context.application.bot_data["allowed"]:
         if check_user_password(user.id, message.text.strip()):
             context.application.bot_data["allowed"].add(user.id)
