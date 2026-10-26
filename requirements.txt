@@ -2,4 +2,4 @@ python-telegram-bot[job-queue]
 httpx
 beautifulsoup4
 python-dotenv
-opensooq-mcp
+git+https://github.com/isaamthalhath07/opensooq-mcp.git
