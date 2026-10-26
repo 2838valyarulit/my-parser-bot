@@ -213,6 +213,7 @@ def parse_listing(raw, ad):
 
     return ad
 
+# --- УСИЛЕННЫЙ ПАРСЕР ПРОФИЛЯ ---
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     data = props(soup)
@@ -520,10 +521,10 @@ class Service:
                             raw, final = await self.reader.get(url)
                             ads, next_url = await asyncio.to_thread(parse_category, raw, final)
                         except (SourceError, ValueError) as exc:
-                            errors += 1
+                            # Если мы упали на пагинации в конце, просто игнорируем, чтобы не ломать отчет
                             warnings.add(str(exc))
-                            stop = isinstance(exc, RateLimit)
                             break
+                        
                         for ad in ads:
                             key = urlsplit(ad["url"]).hostname + ":" + ad["id"]
                             if key in seen: continue
@@ -562,7 +563,6 @@ class Service:
                         if page_index + 1 == MAX_PAGES: limited = True
                     if stop: break
             
-            # --- КРАСИВЫЙ ОТЧЕТ В СТИЛЕ VOIDPARSER ---
             duration = round(time.time() - start_time)
             
             if sent == 0 and checked > 0:
@@ -579,7 +579,6 @@ class Service:
                     f"→ Ошибок парсинга: {errors} шт."
                 )
 
-            # Подготовка кнопок под отчетом
             report_buttons = []
             if sent > 0:
                 report_buttons.append([InlineKeyboardButton("🔍 Показать найденное", callback_data="show_last_results")])
@@ -599,7 +598,8 @@ class Service:
         except Forbidden: self.save(chat, enabled=0)
         except Exception as exc:
             log.error("Проверка прервана: %s", type(exc).__name__)
-            with suppress(TelegramError): await self.bot.send_message(chat_id=chat, text="Ошибка проверки. Проверьте журнал.")
+            with suppress(TelegramError): 
+                await self.bot.send_message(chat_id=chat, text=f"⚠️ Ошибка проверки: {type(exc).__name__}\nПроверьте логи.")
         finally: self.tasks.pop(chat, None)
 
     async def close(self):
@@ -609,6 +609,7 @@ class Service:
         await self.reader.http.aclose()
         self.db.close()
 
+# ... (остальной код handle и button_handler остается без изменений, как в предыдущем сообщении)
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message, user, chat = update.effective_message, update.effective_user, update.effective_chat
     if not message or not user or not chat or chat.type != "private": return
