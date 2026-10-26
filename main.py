@@ -213,45 +213,43 @@ def parse_listing(raw, ad):
 
     return ad
 
-# --- МОЩНЫЙ ПАРСЕР ПРОФИЛЯ ЧЕРЕЗ РЕГУЛЯРКИ ---
+# --- БЕЗОПАСНЫЙ ПАРСЕР ПРОФИЛЯ ---
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     
-    # Убираем скрипты и стили, чтобы получить чистый текст страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Просмотры (Views / مشاهدة)
+    # 1. Просмотры (Views)
     match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
     if match_views: result["seller_views"] = count(match_views.group(1))
     
-    # 2. Отзывы (Reviews / reviews / تقييمات / مراجعات)
-    # Ищем паттерн типа "(1 reviews)" или "1 reviews"
+    # 2. Отзывы (Reviews)
     match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
     if match_reviews: result["reviews"] = count(match_reviews.group(1))
-    elif "0 reviews" in page_text or "0 تقييمات" in page_text: result["reviews"] = 0
     
-    # 3. Проданные (Sold Listings / Sold / المباعة)
+    # 3. Проданные (Sold)
     match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
     if match_sold: result["sold"] = count(match_sold.group(1))
-    elif "Sold Listings (0)" in page_text or "0 Sold" in page_text: result["sold"] = 0
 
-    # 4. Рейтинг (Rating)
+    # 4. Рейтинг
     match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
     if match_rating: result["rating"] = number(match_rating.group(1))
     
-    # Если рейтинг/оценки не нашлись в тексте, пробуем заглянуть в JSON (на всякий случай)
-    if result["rating"] is None:
+    # Дополнительно проверяем JSON, если текстовый поиск не дал результатов
+    try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
         if isinstance(mem, dict):
             rat = mem.get("rating") or {}
-            result["rating"] = number(rat.get("average_rating"))
-            result["ratings"] = count(rat.get("number_of_rating"))
+            if result["rating"] is None: result["rating"] = number(rat.get("average_rating"))
+            if result["ratings"] is None: result["ratings"] = count(rat.get("number_of_rating"))
             if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
             if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count"))
+    except Exception:
+        pass # Если JSON битый, просто игнорируем
 
     return result
 
@@ -444,7 +442,6 @@ HELP_TEXT = """ℹ️ *Справка по командам*
 """
 
 def get_main_menu():
-    # Изменили название кнопки на "🚀 Начать Парсинг"
     keyboard = [
         [InlineKeyboardButton("📊 Мои фильтры", callback_data="menu_filters")],
         [InlineKeyboardButton("🔗 Категории", callback_data="menu_sources")],
@@ -574,7 +571,6 @@ class Service:
             
             duration = round(time.time() - start_time)
             
-            # Если ничего не нашли, пишем "Вы получили все объявления"
             if sent == 0 and checked > 0:
                 report = "✅ <b>Вы получили все объявления.</b>\n\nНовых объявлений не найдено."
             else:
@@ -607,7 +603,6 @@ class Service:
         except asyncio.CancelledError: raise
         except Forbidden: self.save(chat, enabled=0)
         except Exception as exc:
-            # Заменили текст ошибки на "Вы получили все объявления"
             log.error("Проверка прервана: %s", type(exc).__name__)
             with suppress(TelegramError): 
                 await self.bot.send_message(chat_id=chat, text="✅ <b>Вы получили все объявления.</b>\n\n(Проверка завершена)", parse_mode="HTML")
