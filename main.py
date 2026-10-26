@@ -29,7 +29,7 @@ MAX_PAGES, MAX_ADS, MAX_SEND = 2, 60, 20
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
 
-# Стоп-слова для машин, квартир и услуг (ищем в тексте)
+# Стоп-слова
 EXCLUDED_WORDS = ["car", "cars", "auto", "autos", "kia", "gmc", "toyota", "nissan", "chevrolet", "ford", "bmw", "mercedes", "audi", "hyundai", "apartment", "flat", "real estate", "rent", "rental", "delivery", "service", "job", "vacancy", "سيارة", "سيارات", "شقة", "شقق", "عقار", "ايجار", "تأجير", "خدمة", "وظيفة"]
 
 def generate_password(length=8):
@@ -50,20 +50,17 @@ def save_user_password(user_id, password):
             f.write(f"{uid}:{pwd}\n")
 
 def check_user_password(user_id, password):
-    if not os.path.exists("passwords.txt"):
-        return False
+    if not os.path.exists("passwords.txt"): return False
     with open("passwords.txt", "r") as f:
         for line in f:
             if ":" in line:
                 uid, pwd = line.strip().split(":", 1)
-                if uid == str(user_id) and pwd == password:
-                    return True
+                if uid == str(user_id) and pwd == password: return True
     return False
 
 def is_blocked(user_id):
     if not os.path.exists("blocked.txt"): return False
-    with open("blocked.txt", "r") as f:
-        return str(user_id) in [line.strip() for line in f]
+    with open("blocked.txt", "r") as f: return str(user_id) in [line.strip() for line in f]
 
 def block_user(user_id):
     if not is_blocked(user_id):
@@ -153,7 +150,6 @@ def parse_category(raw, url):
     for row in block["items"]:
         if (not isinstance(row, dict) or not row.get("id") or not row.get("title")): continue
         
-        # Фильтр стоп-слов
         title_lower = str(row.get("title", "")).lower()
         if any(word in title_lower for word in EXCLUDED_WORDS): continue
 
@@ -201,21 +197,20 @@ def parse_listing(raw, ad):
         ad["price"] = number(prices[0].get("price"))
         ad["currency"] = str(prices[0].get("key") or prices[0].get("currencyLabel") or ad["currency"])
 
-    # Время публикации
+    # Улучшенный парсер времени
     time_str = None
     for obj in walk([data]):
         if isinstance(obj, dict):
             if "createdAt" in obj:
                 time_str = obj["createdAt"]
                 break
-            if "time" in obj and isinstance(obj["time"], str):
+            if "time" in obj and isinstance(obj["time"], str) and len(obj["time"]) < 30: # Защита от мусора
                 time_str = obj["time"]
                 break
     if not time_str:
         text_content = soup.get_text(" ", strip=True)
-        match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|mins|دقائق|ساعات|أيام)\s+ago|Published\s+Date\s*[:\-]?\s*([^|]+))", text_content, re.I)
-        if match_time:
-            time_str = (match_time.group(1) or match_time.group(2)).strip()
+        match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|دقائق|ساعات|أيام)\s+ago)", text_content, re.I)
+        if match_time: time_str = match_time.group(1).strip()
     ad["time"] = time_str or "Неизвестно"
 
     return ad
@@ -367,19 +362,17 @@ class Reader:
             self.cache = dict(list(self.cache.items())[-1000:])
         return ad, warning
 
-# --- НОВАЯ ФУНКЦИЯ ДИЗАЙНА ---
+# --- ИСПРАВЛЕННЫЙ ДИЗАЙН ---
 def card(ad):
-    """Формирует две части текста: основную и детали с описанием."""
     def show(key):
         value = ad.get(key)
         if value is None: return "нет данных"
         if isinstance(value, float): return f"{value:g}"
         return str(value)
 
-    # Первая часть (пойдет в подпись к фото)
-    # Если локации нет в парсере, выведется "Не указана"
     loc = ad.get('location', 'Не указана')
     
+    # 1. Верхняя часть (Фото + Цена)
     main_text = (
         f"<b>Объявление №{show('id')}</b>\n\n"
         f"📺 <b>{ad['title'][:100]}</b>\n"
@@ -387,13 +380,24 @@ def card(ad):
         f"📍 <b>Локация:</b> {loc}"
     )
 
-    # Вторая часть (пойдет отдельным сообщением)
-    desc = ad.get('description', 'Без описания').strip()
+    # 2. Очистка описания от мусора (JSON)
+    desc = ad.get('description', '').strip()
+    if desc.startswith("{'") or desc.startswith('{"'):
+        try:
+            import ast
+            parsed = ast.literal_eval(desc)
+            if isinstance(parsed, dict) and 'content' in parsed:
+                desc = str(parsed['content'])
+        except:
+            pass
+    
+    # Обрезаем длинное описание (максимум 350 символов, чтобы не было портянки)
     if not desc: desc = "Без описания"
-    if len(desc) > 800: desc = desc[:800] + "..."
+    if len(desc) > 350: desc = desc[:347] + "..."
+
+    time_info = f"• <b>Опубликовано:</b> {show('time')}\n" if ad.get('time') and ad['time'] != 'Неизвестно' else ""
     
-    time_info = f"• <b>Опубликовано:</b> {show('time')}\n" if ad.get('time') else ""
-    
+    # 3. Нижняя часть (Описание, Продавец, Детали)
     details_text = (
         f"📖 <b>Описание:</b>\n"
         f"<blockquote>{desc}</blockquote>\n\n"
@@ -496,9 +500,7 @@ class Service:
             task.cancel()
             with suppress(asyncio.CancelledError): await task
 
-    # --- НОВЫЙ МЕТОД ОТПРАВКИ ---
     async def send(self, chat, ad):
-        # Собираем кнопки
         buttons = []
         if ad.get("url"):
             buttons.append([InlineKeyboardButton("🔗 Ссылка на товар", url=ad["url"])])
@@ -507,10 +509,8 @@ class Service:
         
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
 
-        # Получаем две части текста из новой функции card()
         main_text, details_text = card(ad)
         
-        # 1. Отправляем фото с основной инфой и кнопками
         if ad.get("images"):
             try:
                 await telegram_call(
@@ -522,7 +522,6 @@ class Service:
                     reply_markup=reply_markup
                 )
             except BadRequest:
-                # Если фото битое, отправляем просто текст
                 await telegram_call(
                     self.bot.send_message, 
                     chat_id=chat, 
@@ -539,10 +538,8 @@ class Service:
                 reply_markup=reply_markup
             )
 
-        # Небольшая пауза, чтобы сообщения не слипались в одно
         await asyncio.sleep(0.5)
 
-        # 2. Отправляем детали и описание (без кнопок)
         await telegram_call(
             self.bot.send_message, 
             chat_id=chat, 
