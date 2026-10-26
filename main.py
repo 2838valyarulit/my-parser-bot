@@ -22,7 +22,7 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Пытаемся импортировать клиент OpenSooq для подсчета объявлений
+# Пытаемся импортировать клиент OpenSooq (файл opensooq_client.py должен лежать рядом)
 try:
     import opensooq_client as oc
 except ImportError:
