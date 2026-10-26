@@ -213,7 +213,6 @@ def parse_listing(raw, ad):
 
     return ad
 
-# --- БЕЗОПАСНЫЙ ПАРСЕР ПРОФИЛЯ ---
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     
@@ -222,23 +221,18 @@ def parse_profile(raw, expected_id):
     
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Просмотры (Views)
     match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
     if match_views: result["seller_views"] = count(match_views.group(1))
     
-    # 2. Отзывы (Reviews)
     match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
     if match_reviews: result["reviews"] = count(match_reviews.group(1))
     
-    # 3. Проданные (Sold)
     match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
     if match_sold: result["sold"] = count(match_sold.group(1))
 
-    # 4. Рейтинг
     match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
     if match_rating: result["rating"] = number(match_rating.group(1))
     
-    # Дополнительно проверяем JSON, если текстовый поиск не дал результатов
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
@@ -249,7 +243,7 @@ def parse_profile(raw, expected_id):
             if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
             if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count"))
     except Exception:
-        pass # Если JSON битый, просто игнорируем
+        pass
 
     return result
 
@@ -571,34 +565,40 @@ class Service:
             
             duration = round(time.time() - start_time)
             
+            # --- НОВЫЙ КРАСИВЫЙ ДИЗАЙН ОТЧЕТА ---
             if sent == 0 and checked > 0:
-                report = "✅ <b>Вы получили все объявления.</b>\n\nНовых объявлений не найдено."
+                header = "✅ <b>Вы получили все сообщения.</b>\n(Проверка завершена)"
             else:
-                report = (
-                    f"📊 <b>Результаты проверки</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"✅ Показано: <b>{sent}</b> объявлений\n"
-                    f"⏱ Время: {duration} сек.\n\n"
-                    f"🔍 <b>Статистика:</b>\n"
-                    f"→ Обработано: {checked} шт.\n"
-                    f"→ Уже присылались: {skipped} шт.\n"
-                    f"→ Ошибок парсинга: {errors} шт."
-                )
+                header = "✅ <b>Вы получили все сообщения.</b>"
+
+            dashboard = (
+                f"🇦🇪 <b>OpenSooq Парсер</b> <i>(Отчет)</i>\n\n"
+                f"✅ <b>Показано:</b> {sent} объявлений\n"
+                f"⏱ <b>Время:</b> {duration} сек.\n\n"
+                f"📈 <b>Ваши настройки фильтров отсеяли {skipped} из пропущенных:</b>\n"
+                f"  → Уже присылались: {skipped} шт.\n"
+                f"  → Ошибок парсинга: {errors} шт.\n\n"
+                f"⚙️ <b>Системная информация:</b>\n"
+                f"Всего обработано карточек: {checked} шт."
+            )
 
             report_buttons = []
             if sent > 0:
                 report_buttons.append([InlineKeyboardButton("🔍 Показать найденное", callback_data="show_last_results")])
             
-            report_buttons.append([InlineKeyboardButton("🔄 Повторить поиск", callback_data="menu_check")])
-            report_buttons.append([InlineKeyboardButton("⚙️ Сменить ссылки", callback_data="menu_sources")])
+            report_buttons.extend([
+                [InlineKeyboardButton("🔄 Повторить поиск", callback_data="menu_check")],
+                [InlineKeyboardButton("✏️ Сменить ссылки и запустить", callback_data="menu_sources")]
+            ])
             
             report_markup = InlineKeyboardMarkup(report_buttons)
 
             state = self.state(chat)
-            self.save(chat, last=report, next_check=time.time() + state["minutes"] * 60)
+            self.save(chat, last=dashboard, next_check=time.time() + state["minutes"] * 60)
             
             if notify or errors or missing or warnings:
-                await telegram_call(self.bot.send_message, chat_id=chat, text=report, parse_mode="HTML", reply_markup=report_markup)
+                await telegram_call(self.bot.send_message, chat_id=chat, text=header, parse_mode="HTML")
+                await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
                 
         except asyncio.CancelledError: raise
         except Forbidden: self.save(chat, enabled=0)
@@ -715,11 +715,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 url = safe_url(argument if command == "/add" else message.text.strip())
                 if re.search(r"/(?:search|lists)/\d+", urlsplit(url).path): raise ValueError("Нужна ссылка на категорию.")
                 if url not in state["urls"]:
-                    if len(state["urls"]) >= 5: raise ValueError("Максимум 5 категорий.")
+                    if len(state["urls"]) >= 5: raise ValueError("Максимум !")
+5 категорий.")
                     state["urls"].append(url)
                     service.save(chat.id, urls=state["urls"])
-                    await message.reply_text("✅ Категория добавлена!")
-            if not state["urls"]: raise ValueError("Сначала отправьте ссылку на категорию.")
+                    await message.reply_text("✅ Категория добавлена            if not state["urls"]: raise ValueError("Сначала отправьте ссылку на категорию.")
             if command == "/watch": service.save(chat.id, enabled=1)
             started = service.trigger(chat.id)
             if not is_link:
