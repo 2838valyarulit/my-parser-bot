@@ -1,4 +1,4 @@
-"""OpenSooq -> Telegram (Только товары + кнопки)."""
+"""OpenSooq -> Telegram (Только товары + время + просмотры)."""
 import asyncio
 import json
 import logging
@@ -138,7 +138,6 @@ def parse_category(raw, url):
     for row in block["items"]:
         if (not isinstance(row, dict) or not row.get("id") or not row.get("title")): continue
         
-        # Проверка на стоп-слова (машины, квартиры, услуги)
         tags = set(row.get("tags", []))
         if tags & EXCLUDED_TAGS: continue
 
@@ -185,6 +184,30 @@ def parse_listing(raw, ad):
     if prices:
         ad["price"] = number(prices[0].get("price"))
         ad["currency"] = str(prices[0].get("key") or prices[0].get("currencyLabel") or ad["currency"])
+
+    # --- ВЫТАСКИВАЕМ ВРЕМЯ ПУБЛИКАЦИИ ---
+    time_str = None
+    for obj in walk([data]):
+        if isinstance(obj, dict):
+            if "createdAt" in obj:
+                time_str = obj["createdAt"]
+                break
+            if "time" in obj and isinstance(obj["time"], str):
+                time_str = obj["time"]
+                break
+    if not time_str:
+        # Если в JSON нет, ищем в тексте ("3 minutes ago")
+        text_content = soup.get_text(" ", strip=True)
+        match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|mins|دقائق|ساعات|أيام)\s+ago)", text_content, re.I)
+        if match_time:
+            time_str = match_time.group(1)
+        else:
+            match_time = re.search(r"(?:Created|Posted)\s+([^|]+)", text_content, re.I)
+            if match_time:
+                time_str = match_time.group(1).strip()
+                
+    ad["time"] = time_str or "Неизвестно"
+
     return ad
 
 def parse_profile(raw, expected_id):
@@ -195,14 +218,17 @@ def parse_profile(raw, expected_id):
     rating = member.get("rating") or {}
     result = {"rating": number(rating.get("average_rating")), "ratings": count(rating.get("number_of_rating")), "reviews": count(rating.get("number_of_reviews")), "seller_views": count(member.get("views_count")), "sold": None}
     
-    # Пытаемся вытащить просмотры из JSON, если их нет в тексте
+    # Глубокий поиск просмотров в JSON
     if result["seller_views"] is None:
         for obj in walk([data]):
-            if isinstance(obj, dict) and "views" in obj:
-                val = count(obj["views"])
-                if val is not None:
-                    result["seller_views"] = val
-                    break
+            if isinstance(obj, dict):
+                for key in ("views", "viewsCount", "views_count"):
+                    if key in obj:
+                        val = count(obj[key])
+                        if val is not None:
+                            result["seller_views"] = val
+                            break
+                if result["seller_views"] is not None: break
 
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
@@ -338,7 +364,10 @@ def card(ad):
         if value is None: return "нет данных"
         if isinstance(value, float): return f"{value:g}"
         return str(value)
-    text = f"{ad['title'][:120]}\n💰 {show('price')} {ad.get('currency', '')}\n📷 Фото: {show('photos')}\n👁 Просмотры: {show('views')}\n\n👤 Продавец: {ad.get('seller_name', '')[:70] or 'нет данных'}\n⭐ Рейтинг: {show('rating')}\nОценок: {show('ratings')}\nОтзывов: {show('reviews')}\nПродано: {show('sold')}\nПросмотры профиля ≈ {show('seller_views')}"
+    
+    time_info = f"⏱ Опубликовано: {show('time')}\n" if ad.get('time') else ""
+    
+    text = f"{ad['title'][:120]}\n💰 {show('price')} {ad.get('currency', '')}\n📷 Фото: {show('photos')}\n👁 Просмотры: {show('views')}\n{time_info}\n👤 Продавец: {ad.get('seller_name', '')[:70] or 'нет данных'}\n⭐ Рейтинг: {show('rating')}\nОценок: {show('ratings')}\nОтзывов: {show('reviews')}\nПродано: {show('sold')}\nПросмотры профиля ≈ {show('seller_views')}"
     return text.encode("utf-16-le")[:1990].decode("utf-16-le", errors="ignore")
 
 async def telegram_call(method, **kwargs):
