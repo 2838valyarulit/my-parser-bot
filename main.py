@@ -25,7 +25,7 @@ from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filt
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {c + ".opensooq.com" for c in COUNTRIES}
 METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "sold", "photos"}
-MAX_PAGES, MAX_ADS, MAX_SEND = 2, 60, 20
+MAX_PAGES, MAX_ADS, MAX_SEND = 5, 500, 100 # Увеличили лимиты, теперь бот не остановится на 20
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
 
@@ -210,14 +210,12 @@ def parse_listing(raw, ad):
         match_time = re.search(r"(\d+\s+(?:minutes?|hours?|days?|mins?|hrs?|دقائق|ساعات|أيام)\s+ago)", text_content, re.I)
         if match_time: time_str = match_time.group(1).strip()
     ad["time"] = time_str or "Неизвестно"
-
     return ad
 
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Пытаемся найти данные в JSON (самый надежный способ)
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
@@ -228,14 +226,12 @@ def parse_profile(raw, expected_id):
             result["reviews"] = count(rat.get("number_of_reviews"))
             result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
             
-            # Sold Listings иногда лежат в member_info
             info = mem.get("member_info") or {}
             if "sold_listings_count" in info:
                 result["sold"] = count(info["sold_listings_count"])
     except Exception:
         pass
 
-    # 2. Если JSON не дал результатов, парсим текст страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
@@ -356,19 +352,23 @@ class Reader:
         ad["url"] = final
         ad = await asyncio.to_thread(parse_listing, raw, ad)
         warning = ""
+        
+        # Парсим страницу продавца
         url = ad.get("seller_url")
         if url:
             cached = self.cache.get(url)
             if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
                 try:
-                    raw, _ = await self.get(url)
-                    profile = await asyncio.to_thread(parse_profile, raw, ad["seller_id"])
+                    raw_prof, _ = await self.get(url)
+                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
                 except RateLimit: raise
                 except (SourceError, ValueError): profile = None
                 self.cache[url] = (time.monotonic() + 300, profile)
+            
             if profile is not None: ad.update({key: value for key, value in profile.items() if value is not None})
             else: warning = "Часть профилей недоступна."
+            
         if len(self.cache) > 2000:
             self.cache = {key: value for key, value in self.cache.items() if value[0] > time.monotonic()}
             self.cache = dict(list(self.cache.items())[-1000:])
@@ -521,6 +521,14 @@ class Service:
         stop, limited = False, False
         start_time = time.time()
         
+        # Отправляем и закрепляем сообщение о начале
+        start_msg = None
+        try:
+            start_msg = await self.bot.send_message(chat_id=chat, text="🚀 <b>Начинаю парсинг...</b>", parse_mode="HTML")
+            await self.bot.pin_chat_message(chat_id=chat, message_id=start_msg.message_id, disable_notification=True)
+        except Exception as e:
+            log.error(f"Не удалось закрепить сообщение: {e}")
+
         try:
             async with self.lock:
                 for source in self.state(chat)["urls"]:
@@ -542,10 +550,14 @@ class Service:
                             delivered = self.db.execute("SELECT 1 FROM delivered WHERE chat=? AND key=?", (chat, key)).fetchone()
                             if delivered:
                                 skipped += 1
-                                continue
+                                # Если дошли до старого объявления — останавливаем парсинг
+                                stop = True
+                                break
+                            
                             if checked >= MAX_ADS or sent >= MAX_SEND:
                                 stop, limited = True, True
                                 break
+                                
                             checked += 1
                             try:
                                 ad, warning = await self.reader.enrich(ad)
@@ -575,36 +587,30 @@ class Service:
             
             duration = round(time.time() - start_time)
             
-            # Заголовок
-            header = "✅ <b>Вы получили все сообщения.</b>\n(Проверка завершена)"
-
-            # Дашборд
+            header = "✅ <b>Вы получили все сообщения.</b>"
+            
+            # Более минималистичный дизайн
             dashboard = (
-                f"🇦🇪 <b>OpenSooq Парсер</b> <i>(Отчет)</i>\n\n"
-                f"✅ <b>Показано:</b> {sent} объявлений\n"
-                f"⏱ <b>Время:</b> {duration} сек.\n\n"
-                f"📈 <b>Ваши настройки фильтров отсеяли {skipped} из пропущенных:</b>\n"
-                f"  → Уже присылались: {skipped} шт.\n"
-                f"  → Ошибок парсинга: {errors} шт.\n\n"
-                f"⚙️ <b>Системная информация:</b>\n"
-                f"Всего обработано карточек: {checked} шт."
+                f"📊 <b>Отчет о парсинге</b>\n\n"
+                f"✅ Найдено новых: <b>{sent}</b>\n"
+                f"⏱ Время: {duration} сек.\n"
+                f"👀 Всего обработано: {checked} шт.\n"
+                f"🔄 Пропущено (уже было): {skipped} шт.\n"
+                f"⚠️ Ошибок: {errors} шт."
             )
 
+            # Убрали кнопку "Сменить ссылки"
             report_buttons = []
             if sent > 0:
                 report_buttons.append([InlineKeyboardButton("🔍 Показать найденное", callback_data="show_last_results")])
             
-            report_buttons.extend([
-                [InlineKeyboardButton("🔄 Повторить поиск", callback_data="menu_check")],
-                [InlineKeyboardButton("✏️ Сменить ссылки и запустить", callback_data="menu_sources")]
-            ])
+            report_buttons.append([InlineKeyboardButton("🔄 Повторить поиск", callback_data="menu_check")])
             
             report_markup = InlineKeyboardMarkup(report_buttons)
 
             state = self.state(chat)
             self.save(chat, last=dashboard, next_check=time.time() + state["minutes"] * 60)
             
-            # Отправляем ВСЕГДА, даже если ошибок не было
             await telegram_call(self.bot.send_message, chat_id=chat, text=header, parse_mode="HTML")
             await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
                 
@@ -614,7 +620,12 @@ class Service:
             log.error("Проверка прервана: %s", type(exc).__name__)
             with suppress(TelegramError): 
                 await self.bot.send_message(chat_id=chat, text="✅ <b>Вы получили все объявления.</b>\n\n(Проверка завершена)", parse_mode="HTML")
-        finally: self.tasks.pop(chat, None)
+        finally:
+            # Открепляем сообщение о начале парсинга
+            if start_msg:
+                with suppress(TelegramError):
+                    await self.bot.unpin_chat_message(chat_id=chat, message_id=start_msg.message_id)
+            self.tasks.pop(chat, None)
 
     async def close(self):
         tasks = list(self.tasks.values())
@@ -760,7 +771,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text("⚠️ Сначала добавь категорию!", reply_markup=get_main_menu())
             return
         started = service.trigger(chat_id)
-        await query.message.edit_text("🚀 Парсинг начался..." if started else "⏳ Парсинг уже выполняется.", reply_markup=get_main_menu())
+        if started:
+            await query.message.edit_text("🚀 Парсинг запущен...")
+        else:
+            await query.message.edit_text("⏳ Парсинг уже выполняется.")
     elif data == "menu_help":
         await query.message.edit_text(HELP_TEXT, parse_mode="Markdown", reply_markup=get_main_menu())
     elif data == "show_last_results":
