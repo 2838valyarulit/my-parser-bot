@@ -1412,6 +1412,10 @@ def build_app(token, allowed, database):
         .build()
     )
 
+    # Регистрируем команды, чтобы бот их видел
+    app.add_handler(CommandHandler("createpass", handle))
+    app.add_handler(CommandHandler("id", handle))
+
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT, handle
