@@ -29,7 +29,6 @@ MAX_PAGES, MAX_ADS, MAX_SEND = 2, 60, 20
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
 
-# Стоп-слова
 EXCLUDED_WORDS = ["car", "cars", "auto", "autos", "kia", "gmc", "toyota", "nissan", "chevrolet", "ford", "bmw", "mercedes", "audi", "hyundai", "apartment", "flat", "real estate", "rent", "rental", "delivery", "service", "job", "vacancy", "سيارة", "سيارات", "شقة", "شقق", "عقار", "ايجار", "تأجير", "خدمة", "وظيفة"]
 
 def generate_password(length=8):
@@ -197,14 +196,13 @@ def parse_listing(raw, ad):
         ad["price"] = number(prices[0].get("price"))
         ad["currency"] = str(prices[0].get("key") or prices[0].get("currencyLabel") or ad["currency"])
 
-    # Улучшенный парсер времени
     time_str = None
     for obj in walk([data]):
         if isinstance(obj, dict):
             if "createdAt" in obj:
                 time_str = obj["createdAt"]
                 break
-            if "time" in obj and isinstance(obj["time"], str) and len(obj["time"]) < 30: # Защита от мусора
+            if "time" in obj and isinstance(obj["time"], str) and len(obj["time"]) < 30:
                 time_str = obj["time"]
                 break
     if not time_str:
@@ -220,6 +218,7 @@ def parse_profile(raw, expected_id):
     data = props(soup)
     member = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
     if (not isinstance(member, dict) or str(member.get("id")) != expected_id): member = member if isinstance(member, dict) else {}
+    
     rating = member.get("rating") or {}
     result = {"rating": number(rating.get("average_rating")), "ratings": count(rating.get("number_of_rating")), "reviews": count(rating.get("number_of_reviews")), "seller_views": count(member.get("views_count")), "sold": None}
     
@@ -240,6 +239,7 @@ def parse_profile(raw, expected_id):
     if result["seller_views"] is None:
         match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
         if match_views: result["seller_views"] = count(match_views.group(1))
+
     if member.get("show_sold_listings") in (1, True, "1"):
         match_sold = re.search(r"(?:Sold\s+Listings|الإعلانات\s+المباعة|تم\s+بيعها)\s*[(（]\s*([\d.,٬٫]+\s*[kKmM]?)\s*[)）]", page_text, re.I)
         if match_sold: result["sold"] = count(match_sold.group(1))
@@ -362,7 +362,6 @@ class Reader:
             self.cache = dict(list(self.cache.items())[-1000:])
         return ad, warning
 
-# --- ИСПРАВЛЕННЫЙ ДИЗАЙН ---
 def card(ad):
     def show(key):
         value = ad.get(key)
@@ -371,16 +370,6 @@ def card(ad):
         return str(value)
 
     loc = ad.get('location', 'Не указана')
-    
-    # 1. Верхняя часть (Фото + Цена)
-    main_text = (
-        f"<b>Объявление №{show('id')}</b>\n\n"
-        f"📺 <b>{ad['title'][:100]}</b>\n"
-        f"🏷️ <b>Цена:</b> {show('price')} {ad.get('currency', '')}\n"
-        f"📍 <b>Локация:</b> {loc}"
-    )
-
-    # 2. Очистка описания от мусора (JSON)
     desc = ad.get('description', '').strip()
     if desc.startswith("{'") or desc.startswith('{"'):
         try:
@@ -388,22 +377,22 @@ def card(ad):
             parsed = ast.literal_eval(desc)
             if isinstance(parsed, dict) and 'content' in parsed:
                 desc = str(parsed['content'])
-        except:
-            pass
+        except: pass
     
-    # Обрезаем длинное описание (максимум 350 символов, чтобы не было портянки)
     if not desc: desc = "Без описания"
-    if len(desc) > 350: desc = desc[:347] + "..."
+    if len(desc) > 300: desc = desc[:297] + "..."
 
     time_info = f"• <b>Опубликовано:</b> {show('time')}\n" if ad.get('time') and ad['time'] != 'Неизвестно' else ""
     
-    # 3. Нижняя часть (Описание, Продавец, Детали)
-    details_text = (
+    full_text = (
+        f"<b>Объявление №{show('id')}</b>\n\n"
+        f"📺 <b>{ad['title'][:100]}</b>\n"
+        f"🏷️ <b>Цена:</b> {show('price')} {ad.get('currency', '')}\n"
+        f"📍 <b>Локация:</b> {loc}\n\n"
         f"📖 <b>Описание:</b>\n"
         f"<blockquote>{desc}</blockquote>\n\n"
         f"💼 <b>Продавец:</b> {ad.get('seller_name', 'Неизвестен')[:50]}\n\n"
         f"📝 <b>Детали:</b>\n"
-        f"• <b>Просмотры:</b> {show('views')}\n"
         f"• <b>Фото:</b> {show('photos')}\n"
         f"{time_info}"
         f"• <b>Рейтинг:</b> {show('rating')} (Оценок: {show('ratings')})\n"
@@ -411,8 +400,7 @@ def card(ad):
         f"• <b>Продано:</b> {show('sold')}\n"
         f"• <b>Просмотры профиля:</b> ≈ {show('seller_views')}"
     )
-    
-    return main_text, details_text
+    return full_text
 
 async def telegram_call(method, **kwargs):
     try: return await method(**kwargs)
@@ -422,7 +410,6 @@ async def telegram_call(method, **kwargs):
         await asyncio.sleep(float(delay) + 1)
         return await method(**kwargs)
 
-# --- МЕНЮ ---
 HELP_TEXT = """ℹ️ *Справка по командам*
 
 *Управление категориями:*
@@ -502,55 +489,26 @@ class Service:
 
     async def send(self, chat, ad):
         buttons = []
-        if ad.get("url"):
-            buttons.append([InlineKeyboardButton("🔗 Ссылка на товар", url=ad["url"])])
-        if ad.get("seller_url"):
-            buttons.append([InlineKeyboardButton("✉️ Профиль продавца", url=ad["seller_url"])])
+        if ad.get("url"): buttons.append([InlineKeyboardButton("🔗 Ссылка на товар", url=ad["url"])])
+        if ad.get("seller_url"): buttons.append([InlineKeyboardButton("✉️ Профиль продавца", url=ad["seller_url"])])
         
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-
-        main_text, details_text = card(ad)
+        full_text = card(ad)
         
         if ad.get("images"):
             try:
-                await telegram_call(
-                    self.bot.send_photo, 
-                    chat_id=chat, 
-                    photo=ad["images"][0], 
-                    caption=main_text, 
-                    parse_mode="HTML", 
-                    reply_markup=reply_markup
-                )
-            except BadRequest:
-                await telegram_call(
-                    self.bot.send_message, 
-                    chat_id=chat, 
-                    text=main_text, 
-                    parse_mode="HTML", 
-                    reply_markup=reply_markup
-                )
-        else:
-            await telegram_call(
-                self.bot.send_message, 
-                chat_id=chat, 
-                text=main_text, 
-                parse_mode="HTML", 
-                reply_markup=reply_markup
-            )
-
-        await asyncio.sleep(0.5)
-
-        await telegram_call(
-            self.bot.send_message, 
-            chat_id=chat, 
-            text=details_text, 
-            parse_mode="HTML"
-        )
+                await telegram_call(self.bot.send_photo, chat_id=chat, photo=ad["images"][0], caption=full_text, parse_mode="HTML", reply_markup=reply_markup)
+                return
+            except BadRequest as e: log.error(f"BadRequest при отправке фото: {e}")
+        
+        await telegram_call(self.bot.send_message, chat_id=chat, text=full_text, parse_mode="HTML", reply_markup=reply_markup)
 
     async def scan(self, chat, notify):
         checked, sent, errors, skipped = 0, 0, 0, 0
         missing, warnings, seen = set(), set(), set()
         stop, limited = False, False
+        start_time = time.time()
+        
         try:
             async with self.lock:
                 for source in self.state(chat)["urls"]:
@@ -603,13 +561,40 @@ class Service:
                         url = next_url
                         if page_index + 1 == MAX_PAGES: limited = True
                     if stop: break
-            summary = f"Проверено: {checked}. Отправлено: {sent}. Уже отправлялись: {skipped}. Ошибок: {errors}."
-            if missing: summary += "\nНе хватает данных для фильтров: " + ", ".join(sorted(missing))
-            if limited: summary += "\nДостигнут лимит обхода."
-            if warnings: summary += "\n" + "\n".join(sorted(warnings)[:3])
+            
+            # --- КРАСИВЫЙ ОТЧЕТ В СТИЛЕ VOIDPARSER ---
+            duration = round(time.time() - start_time)
+            
+            if sent == 0 and checked > 0:
+                report = "✅ <b>Вы получили все сообщения.</b>\n\nНовых объявлений не найдено."
+            else:
+                report = (
+                    f"📊 <b>Результаты проверки</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Показано: <b>{sent}</b> объявлений\n"
+                    f"⏱ Время: {duration} сек.\n\n"
+                    f"🔍 <b>Статистика:</b>\n"
+                    f"→ Обработано: {checked} шт.\n"
+                    f"→ Уже присылались: {skipped} шт.\n"
+                    f"→ Ошибок парсинга: {errors} шт."
+                )
+
+            # Подготовка кнопок под отчетом
+            report_buttons = []
+            if sent > 0:
+                report_buttons.append([InlineKeyboardButton("🔍 Показать найденное", callback_data="show_last_results")])
+            
+            report_buttons.append([InlineKeyboardButton("🔄 Повторить поиск", callback_data="menu_check")])
+            report_buttons.append([InlineKeyboardButton("⚙️ Сменить ссылки", callback_data="menu_sources")])
+            
+            report_markup = InlineKeyboardMarkup(report_buttons)
+
             state = self.state(chat)
-            self.save(chat, last=summary, next_check=time.time() + state["minutes"] * 60)
-            if notify or errors or missing or warnings: await telegram_call(self.bot.send_message, chat_id=chat, text=summary[:3900])
+            self.save(chat, last=report, next_check=time.time() + state["minutes"] * 60)
+            
+            if notify or errors or missing or warnings:
+                await telegram_call(self.bot.send_message, chat_id=chat, text=report, parse_mode="HTML", reply_markup=report_markup)
+                
         except asyncio.CancelledError: raise
         except Forbidden: self.save(chat, enabled=0)
         except Exception as exc:
@@ -764,6 +749,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("🔍 Проверка началась..." if started else "⏳ Проверка уже выполняется.", reply_markup=get_main_menu())
     elif data == "menu_help":
         await query.message.edit_text(HELP_TEXT, parse_mode="Markdown", reply_markup=get_main_menu())
+    elif data == "show_last_results":
+        await query.answer("Эта функция появится в следующем обновлении! 😉", show_alert=True)
 
 def build_app(token, allowed, database):
     async def setup(app):
