@@ -412,27 +412,27 @@ async def telegram_call(method, **kwargs):
         await asyncio.sleep(float(delay) + 1)
         return await method(**kwargs)
 
-HELP_TEXT = """ℹ️ *Справка по командам*
+HELP_TEXT = """ℹ️ Справка по командам
 
-*Управление категориями:*
-`/sources` — посмотреть добавленные ссылки
-`/remove 1` — удалить категорию по номеру
+Управление категориями:
+/sources — посмотреть добавленные ссылки
+/remove 1 — удалить категорию по номеру
 
-*Управление фильтрами:*
-`/filters` — посмотреть текущие фильтры
-`/filters price_max=500 currency=AED` — установить фильтр
-`/filters keywords="iphone,samsung" exclude="broken,parts"`
-`/reset` — сбросить все фильтры
+Управление фильтрами:
+/filters — посмотреть текущие фильтры
+/filters price_max=500 currency=AED
+/filters keywords="iphone,samsung" exclude="broken,parts"
+/reset — сбросить все фильтры
 
-*Мониторинг:*
-`/check` — начать парсинг
-`/watch` — включить регулярную проверку
-`/interval 15` — установить интервал (5-1440 мин)
-`/pause` — остановить мониторинг
-`/status` — посмотреть статус
+Мониторинг:
+/check — начать парсинг
+/watch — включить регулярную проверку
+/interval 15 — установить интервал (5-1440 мин)
+/pause — остановить мониторинг
+/status — посмотреть статус
 
-*Прочее:*
-`/id` — узнать свой Telegram ID
+Прочее:
+/id — узнать свой Telegram ID
 """
 
 def get_main_menu():
@@ -565,7 +565,6 @@ class Service:
             
             duration = round(time.time() - start_time)
             
-            # --- НОВЫЙ КРАСИВЫЙ ДИЗАЙН ОТЧЕТА ---
             if sent == 0 and checked > 0:
                 header = "✅ <b>Вы получили все сообщения.</b>\n(Проверка завершена)"
             else:
@@ -715,11 +714,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 url = safe_url(argument if command == "/add" else message.text.strip())
                 if re.search(r"/(?:search|lists)/\d+", urlsplit(url).path): raise ValueError("Нужна ссылка на категорию.")
                 if url not in state["urls"]:
-                    if len(state["urls"]) >= 5: raise ValueError("Максимум !")
-5 категорий.")
+                    if len(state["urls"]) >= 5: raise ValueError("Максимум 5 категорий.")
                     state["urls"].append(url)
                     service.save(chat.id, urls=state["urls"])
-                    await message.reply_text("✅ Категория добавлена            if not state["urls"]: raise ValueError("Сначала отправьте ссылку на категорию.")
+                    await message.reply_text("✅ Категория добавлена!")
+            if not state["urls"]: raise ValueError("Сначала отправьте ссылку на категорию.")
             if command == "/watch": service.save(chat.id, enabled=1)
             started = service.trigger(chat.id)
             if not is_link:
