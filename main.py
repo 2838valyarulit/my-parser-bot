@@ -1,3 +1,4 @@
+"""OpenSooq -> Telegram (С кнопками)."""
 import asyncio
 import json
 import logging
@@ -20,7 +21,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {c + ".opensooq.com" for c in COUNTRIES}
@@ -329,22 +330,38 @@ async def telegram_call(method, **kwargs):
         await asyncio.sleep(float(delay) + 1)
         return await method(**kwargs)
 
-HELP = """Отправьте ссылку на категорию OpenSooq с объявлениями.
+# --- КРАСИВОЕ МЕНЮ ---
+HELP_TEXT = """ℹ️ *Справка по командам*
 
-/filters price_max=500 currency=AED rating_min=4 photos_min=2
-/filters keywords="iphone,samsung" exclude="broken,parts"
+*Управление категориями:*
+`/sources` — посмотреть добавленные ссылки
+`/remove 1` — удалить категорию по номеру
 
-/filters — текущие фильтры
-/reset — сбросить фильтры
-/sources — категории
-/remove 1 — удалить категорию
-/check — проверить сейчас
-/watch — регулярные проверки
-/interval 15 — интервал 5–1440 минут
-/pause — остановить
-/status — состояние
-/id — ваш Telegram ID
+*Управление фильтрами:*
+`/filters` — посмотреть текущие фильтры
+`/filters price_max=500 currency=AED` — установить фильтр
+`/filters keywords="iphone,samsung" exclude="broken,parts"`
+`/reset` — сбросить все фильтры
+
+*Мониторинг:*
+`/check` — проверить прямо сейчас
+`/watch` — включить регулярную проверку
+`/interval 15` — установить интервал (5-1440 мин)
+`/pause` — остановить мониторинг
+`/status` — посмотреть статус
+
+*Прочее:*
+`/id` — узнать свой Telegram ID
 """
+
+def get_main_menu():
+    keyboard = [
+        [InlineKeyboardButton("📊 Мои фильтры", callback_data="menu_filters")],
+        [InlineKeyboardButton("🔗 Категории", callback_data="menu_sources")],
+        [InlineKeyboardButton("🔍 Проверить сейчас", callback_data="menu_check")],
+        [InlineKeyboardButton("⚙️ Помощь / Команды", callback_data="menu_help")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 class Service:
     def __init__(self, bot, allowed, path):
@@ -514,36 +531,42 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = context.application.bot_data["service"]
     state = service.state(chat.id)
     try:
-        if command in {"/start", "/help"}: await message.reply_text(HELP)
+        if command == "/start":
+            await message.reply_text("👋 Привет! Я бот для мониторинга OpenSooq.\n\nВыбери действие в меню ниже или просто отправь ссылку на категорию.", reply_markup=get_main_menu())
+        elif command == "/help":
+            await message.reply_text(HELP_TEXT, parse_mode="Markdown")
         elif command in {"/filters", "/set"}:
             if argument:
                 state["rules"] = update_filters(state["rules"], argument)
                 service.save(chat.id, rules=state["rules"])
             text = "\n".join(f"{key}={value}" for key, value in state["rules"].items())
-            await message.reply_text("Фильтры:\n" + (text or "не заданы") + "\n\nВсе параметры: /help")
+            await message.reply_text("⚙️ *Текущие фильтры:*\n" + (text or "не заданы") + "\n\nЧтобы изменить, используй `/filters ...`\nПодробнее: /help", parse_mode="Markdown")
         elif command == "/reset":
             service.save(chat.id, rules={})
-            await message.reply_text("Фильтры сброшены.")
+            await message.reply_text("✅ Фильтры сброшены.")
         elif command == "/sources":
-            text = "\n".join(f"{index}. {url}" for index, url in enumerate(state["urls"], 1))
-            await message.reply_text(text[:3900] or "Отправьте ссылку на категорию.", disable_web_page_preview=True)
+            if not state["urls"]:
+                await message.reply_text("📂 Категории не добавлены. Отправь ссылку на категорию.")
+            else:
+                text = "\n".join(f"{index}. {url}" for index, url in enumerate(state["urls"], 1))
+                await message.reply_text("📂 *Твои категории:*\n\n" + text[:3900], disable_web_page_preview=True, parse_mode="Markdown")
         elif command == "/remove":
             index = int(argument) - 1
             if not 0 <= index < len(state["urls"]): raise ValueError("Номер отсутствует. См. /sources.")
             state["urls"].pop(index)
             service.save(chat.id, urls=state["urls"])
-            await message.reply_text("Категория удалена.")
+            await message.reply_text("✅ Категория удалена.")
         elif command == "/interval":
             minutes = int(argument)
             if not 5 <= minutes <= 1440: raise ValueError("Интервал: от 5 до 1440.")
             service.save(chat.id, minutes=minutes, next_check=time.time() + minutes * 60)
-            await message.reply_text(f"Интервал: {minutes} мин.")
+            await message.reply_text(f"⏱ Интервал установлен: {minutes} мин.")
         elif command in {"/pause", "/stop"}:
             await service.pause(chat.id)
-            await message.reply_text("Мониторинг остановлен.")
+            await message.reply_text("⏸ Мониторинг остановлен.")
         elif command == "/status":
-            enabled = "включён" if state["enabled"] else "выключен"
-            await message.reply_text(f"Мониторинг: {enabled}\nИнтервал: {state['minutes']} мин.\nИсточников: {len(state['urls'])}\n" + (state["last"] or "Проверок ещё не было."))
+            enabled = "🟢 Включен" if state["enabled"] else "🔴 Выключен"
+            await message.reply_text(f"📊 *Статус:*\nМониторинг: {enabled}\nИнтервал: {state['minutes']} мин.\nИсточников: {len(state['urls'])}\n\n" + (state["last"] or "Проверок ещё не было."), parse_mode="Markdown")
         elif (command in {"/check", "/watch", "/add"} or message.text.strip().startswith(("https://", "http://"))):
             is_link = message.text.strip().startswith(("https://", "http://"))
             if command == "/add" or is_link:
@@ -553,14 +576,43 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if len(state["urls"]) >= 5: raise ValueError("Максимум 5 категорий.")
                     state["urls"].append(url)
                     service.save(chat.id, urls=state["urls"])
-            if not state["urls"]: raise ValueError("Сначала отправьте ссылку.")
+                    await message.reply_text("✅ Категория добавлена!")
+            if not state["urls"]: raise ValueError("Сначала отправьте ссылку на категорию.")
             if command == "/watch": service.save(chat.id, enabled=1)
             started = service.trigger(chat.id)
-            text = "Мониторинг включён.\n" if command == "/watch" else ""
-            text += "Проверка началась. Остановка: /pause" if started else "Проверка уже выполняется."
-            await message.reply_text(text)
-        else: await message.reply_text("Отправьте ссылку на категорию или /help.")
+            if not is_link:
+                text = "🟢 Мониторинг включен.\n" if command == "/watch" else ""
+                text += "🔍 Проверка началась..." if started else "⏳ Проверка уже выполняется..."
+                await message.reply_text(text)
+        else: await message.reply_text("Отправьте ссылку на категорию или напиши /help.")
     except ValueError as exc: await message.reply_text(str(exc)[:1000] or "Проверьте параметры: /help")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    service = context.application.bot_data["service"]
+    state = service.state(chat_id)
+
+    if data == "menu_filters":
+        text = "\n".join(f"{key}={value}" for key, value in state["rules"].items())
+        await query.message.edit_text("⚙️ *Текущие фильтры:*\n" + (text or "не заданы") + "\n\nЧтобы изменить, используй `/filters ...`", parse_mode="Markdown", reply_markup=get_main_menu())
+    elif data == "menu_sources":
+        if not state["urls"]:
+            await query.message.edit_text("📂 Категории не добавлены. Отправь ссылку на категорию.", reply_markup=get_main_menu())
+        else:
+            text = "\n".join(f"{index}. {url}" for index, url in enumerate(state["urls"], 1))
+            await query.message.edit_text("📂 *Твои категории:*\n\n" + text[:3900], disable_web_page_preview=True, parse_mode="Markdown", reply_markup=get_main_menu())
+    elif data == "menu_check":
+        if not state["urls"]:
+            await query.message.edit_text("⚠️ Сначала добавь категорию!", reply_markup=get_main_menu())
+            return
+        started = service.trigger(chat_id)
+        await query.message.edit_text("🔍 Проверка началась..." if started else "⏳ Проверка уже выполняется.", reply_markup=get_main_menu())
+    elif data == "menu_help":
+        await query.message.edit_text(HELP_TEXT, parse_mode="Markdown", reply_markup=get_main_menu())
 
 def build_app(token, allowed, database):
     async def setup(app):
@@ -568,13 +620,16 @@ def build_app(token, allowed, database):
         app.bot_data["service"] = service
         app.bot_data["allowed"] = allowed
         app.job_queue.run_repeating(service.tick, interval=15, first=5)
-        await app.bot.set_my_commands([BotCommand("start", "Начать"), BotCommand("filters", "Фильтры"), BotCommand("check", "Проверить сейчас"), BotCommand("watch", "Мониторинг"), BotCommand("pause", "Остановить"), BotCommand("sources", "Категории"), BotCommand("help", "Инструкция"), BotCommand("id", "Мой Telegram ID")])
+        await app.bot.set_my_commands([BotCommand("start", "Меню"), BotCommand("help", "Инструкция"), BotCommand("check", "Проверить"), BotCommand("id", "Мой ID")])
     async def cleanup(app):
         service = app.bot_data.pop("service", None)
         if service: await service.close()
     async def on_error(update, context): log.error("Ошибка: %s", type(context.error).__name__)
     app = (Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(cleanup).post_shutdown(cleanup).build())
+    
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
     app.add_error_handler(on_error)
     return app
 
@@ -589,4 +644,4 @@ if __name__ == "__main__":
     allowed = {int(v.strip()) for v in admin_id_str.split(",") if v.strip()}
     
     app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
