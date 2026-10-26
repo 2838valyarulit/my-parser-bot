@@ -215,35 +215,45 @@ def parse_listing(raw, ad):
 
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
-    
-    for tag in soup(["script", "style"]): tag.decompose()
-    page_text = soup.get_text(" ", strip=True)
-    
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-    if match_views: result["seller_views"] = count(match_views.group(1))
-    
-    match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
-    if match_reviews: result["reviews"] = count(match_reviews.group(1))
-    
-    match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
-    if match_sold: result["sold"] = count(match_sold.group(1))
-
-    match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
-    if match_rating: result["rating"] = number(match_rating.group(1))
-    
+    # 1. Пытаемся найти данные в JSON (самый надежный способ)
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
         if isinstance(mem, dict):
             rat = mem.get("rating") or {}
-            if result["rating"] is None: result["rating"] = number(rat.get("average_rating"))
-            if result["ratings"] is None: result["ratings"] = count(rat.get("number_of_rating"))
-            if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
-            if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count"))
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            result["reviews"] = count(rat.get("number_of_reviews"))
+            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
+            
+            # Sold Listings иногда лежат в member_info
+            info = mem.get("member_info") or {}
+            if "sold_listings_count" in info:
+                result["sold"] = count(info["sold_listings_count"])
     except Exception:
         pass
+
+    # 2. Если JSON не дал результатов, парсим текст страницы
+    for tag in soup(["script", "style"]): tag.decompose()
+    page_text = soup.get_text(" ", strip=True)
+    
+    if result["seller_views"] is None:
+        match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+        if match_views: result["seller_views"] = count(match_views.group(1))
+    
+    if result["reviews"] is None:
+        match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+        if match_reviews: result["reviews"] = count(match_reviews.group(1))
+    
+    if result["sold"] is None:
+        match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+        if match_sold: result["sold"] = count(match_sold.group(1))
+
+    if result["rating"] is None:
+        match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+        if match_rating: result["rating"] = number(match_rating.group(1))
 
     return result
 
@@ -565,11 +575,10 @@ class Service:
             
             duration = round(time.time() - start_time)
             
-            if sent == 0 and checked > 0:
-                header = "✅ <b>Вы получили все сообщения.</b>\n(Проверка завершена)"
-            else:
-                header = "✅ <b>Вы получили все сообщения.</b>"
+            # Заголовок
+            header = "✅ <b>Вы получили все сообщения.</b>\n(Проверка завершена)"
 
+            # Дашборд
             dashboard = (
                 f"🇦🇪 <b>OpenSooq Парсер</b> <i>(Отчет)</i>\n\n"
                 f"✅ <b>Показано:</b> {sent} объявлений\n"
@@ -595,9 +604,9 @@ class Service:
             state = self.state(chat)
             self.save(chat, last=dashboard, next_check=time.time() + state["minutes"] * 60)
             
-            if notify or errors or missing or warnings:
-                await telegram_call(self.bot.send_message, chat_id=chat, text=header, parse_mode="HTML")
-                await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
+            # Отправляем ВСЕГДА, даже если ошибок не было
+            await telegram_call(self.bot.send_message, chat_id=chat, text=header, parse_mode="HTML")
+            await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
                 
         except asyncio.CancelledError: raise
         except Forbidden: self.save(chat, enabled=0)
