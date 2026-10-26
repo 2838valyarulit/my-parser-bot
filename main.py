@@ -25,7 +25,7 @@ from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filt
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {c + ".opensooq.com" for c in COUNTRIES}
 METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "sold", "photos"}
-MAX_PAGES, MAX_ADS, MAX_SEND = 5, 500, 100 # Увеличили лимиты, теперь бот не остановится на 20
+MAX_PAGES, MAX_ADS, MAX_SEND = 20, 1000, 200
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
 
@@ -216,22 +216,12 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    try:
-        data = props(soup)
-        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
-        if isinstance(mem, dict):
-            rat = mem.get("rating") or {}
-            result["rating"] = number(rat.get("average_rating"))
-            result["ratings"] = count(rat.get("number_of_rating"))
-            result["reviews"] = count(rat.get("number_of_reviews"))
-            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
-            
-            info = mem.get("member_info") or {}
-            if "sold_listings_count" in info:
-                result["sold"] = count(info["sold_listings_count"])
-    except Exception:
-        pass
-
+    # 1. Ищем просмотры в сыром HTML с помощью регулярки (это спасает, если они спрятаны в скриптах)
+    match_views_raw = re.search(r'"views(?:_count)?"\s*:\s*(\d+)', raw)
+    if match_views_raw:
+        result["seller_views"] = count(match_views_raw.group(1))
+    
+    # 2. Ищем просмотры в видимом тексте страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
@@ -239,6 +229,7 @@ def parse_profile(raw, expected_id):
         match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
         if match_views: result["seller_views"] = count(match_views.group(1))
     
+    # 3. Ищем остальные данные (рейтинг, отзывы, продано)
     if result["reviews"] is None:
         match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
         if match_reviews: result["reviews"] = count(match_reviews.group(1))
@@ -250,6 +241,23 @@ def parse_profile(raw, expected_id):
     if result["rating"] is None:
         match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
         if match_rating: result["rating"] = number(match_rating.group(1))
+
+    # 4. Пытаемся достать из JSON
+    try:
+        data = props(soup)
+        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
+        if isinstance(mem, dict):
+            rat = mem.get("rating") or {}
+            if result["rating"] is None: result["rating"] = number(rat.get("average_rating"))
+            if result["ratings"] is None: result["ratings"] = count(rat.get("number_of_rating"))
+            if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
+            if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
+            
+            info = mem.get("member_info") or {}
+            if "sold_listings_count" in info and result["sold"] is None:
+                result["sold"] = count(info["sold_listings_count"])
+    except Exception:
+        pass
 
     return result
 
@@ -353,7 +361,6 @@ class Reader:
         ad = await asyncio.to_thread(parse_listing, raw, ad)
         warning = ""
         
-        # Парсим страницу продавца
         url = ad.get("seller_url")
         if url:
             cached = self.cache.get(url)
@@ -521,7 +528,6 @@ class Service:
         stop, limited = False, False
         start_time = time.time()
         
-        # Отправляем и закрепляем сообщение о начале
         start_msg = None
         try:
             start_msg = await self.bot.send_message(chat_id=chat, text="🚀 <b>Начинаю парсинг...</b>", parse_mode="HTML")
@@ -534,6 +540,7 @@ class Service:
                 for source in self.state(chat)["urls"]:
                     url, pages_seen = source, set()
                     for page_index in range(MAX_PAGES):
+                        if stop: break # Жесткая остановка при нахождении старого объявления
                         if (url in pages_seen or source not in self.state(chat)["urls"]): break
                         pages_seen.add(url)
                         try:
@@ -550,8 +557,7 @@ class Service:
                             delivered = self.db.execute("SELECT 1 FROM delivered WHERE chat=? AND key=?", (chat, key)).fetchone()
                             if delivered:
                                 skipped += 1
-                                # Если дошли до старого объявления — останавливаем парсинг
-                                stop = True
+                                stop = True # Останавливаем весь парсинг, если нашли старое
                                 break
                             
                             if checked >= MAX_ADS or sent >= MAX_SEND:
@@ -589,7 +595,6 @@ class Service:
             
             header = "✅ <b>Вы получили все сообщения.</b>"
             
-            # Более минималистичный дизайн
             dashboard = (
                 f"📊 <b>Отчет о парсинге</b>\n\n"
                 f"✅ Найдено новых: <b>{sent}</b>\n"
@@ -599,7 +604,6 @@ class Service:
                 f"⚠️ Ошибок: {errors} шт."
             )
 
-            # Убрали кнопку "Сменить ссылки"
             report_buttons = []
             if sent > 0:
                 report_buttons.append([InlineKeyboardButton("🔍 Показать найденное", callback_data="show_last_results")])
@@ -621,7 +625,6 @@ class Service:
             with suppress(TelegramError): 
                 await self.bot.send_message(chat_id=chat, text="✅ <b>Вы получили все объявления.</b>\n\n(Проверка завершена)", parse_mode="HTML")
         finally:
-            # Открепляем сообщение о начале парсинга
             if start_msg:
                 with suppress(TelegramError):
                     await self.bot.unpin_chat_message(chat_id=chat, message_id=start_msg.message_id)
@@ -723,7 +726,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             service.save(chat.id, minutes=minutes, next_check=time.time() + minutes * 60)
             await message.reply_text(f"⏱ Интервал установлен: {minutes} мин.")
         elif command in {"/pause", "/stop"}:
-            await service.pause(chat.id)
+            # Сначала отменяем задачу, чтобы не ждать лок
+            task = service.tasks.get(chat.id)
+            if task and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError): await task
+            service.save(chat.id, enabled=0)
             await message.reply_text("⏸ Мониторинг остановлен.")
         elif command == "/status":
             enabled = "🟢 Включен" if state["enabled"] else "🔴 Выключен"
