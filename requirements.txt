@@ -2,4 +2,4 @@ python-telegram-bot[job-queue]
 httpx
 beautifulsoup4
 python-dotenv
-Flask
+playwright
