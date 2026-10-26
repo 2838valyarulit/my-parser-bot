@@ -212,35 +212,56 @@ def parse_listing(raw, ad):
     ad["time"] = time_str or "Неизвестно"
     return ad
 
-async def parse_profile_via_api(client, seller_id, country_code):
-    # Прямой запрос к скрытому API OpenSooq
-    url = f"https://api.opensooq.com/v1/user/{seller_id}/profile"
-    headers = {"Accept": "application/json", "User-Agent": "OpenSooqTelegramBot/1.0"}
+def parse_profile(raw, expected_id):
+    soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
+    # Пытаемся вытащить из JSON
     try:
-        r = await client.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            # Пытаемся найти нужные ключи в ответе API
-            member = data.get("data", {}).get("member", {})
-            if not member: member = data.get("member", {})
+        data = props(soup)
+        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
+        if isinstance(mem, dict):
+            rat = mem.get("rating") or {}
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            result["reviews"] = count(rat.get("number_of_reviews"))
+            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
             
-            if member:
-                rating = member.get("rating", {})
-                result["rating"] = number(rating.get("average_rating"))
-                result["ratings"] = count(rating.get("number_of_rating"))
-                result["reviews"] = count(rating.get("number_of_reviews"))
-                
-                # Просмотры и продано (ключи могут отличаться)
-                result["seller_views"] = count(member.get("views_count") or member.get("views") or member.get("total_views"))
-                
-                # Ищем Sold
-                for key in ("sold_listings", "sold_listings_count", "sold"):
-                    if key in member: result["sold"] = count(member[key]); break
-    except Exception as e:
-        log.warning(f"API profile failed for {seller_id}: {e}")
+            info = mem.get("member_info") or {}
+            if "sold_listings_count" in info:
+                result["sold"] = count(info["sold_listings_count"])
+    except Exception:
+        pass
+
+    # Если не вышло, ищем в сыром HTML (даже если данные сгенерированы JS, иногда они есть в виде скриптов)
+    if result["seller_views"] is None:
+        m = re.search(r'"total_views"\s*:\s*(\d+)', raw) or re.search(r'"view_count"\s*:\s*(\d+)', raw)
+        if m: result["seller_views"] = count(m.group(1))
+
+    if result["sold"] is None:
+        m = re.search(r'"sold_listings_count"\s*:\s*(\d+)', raw) or re.search(r'"sold"\s*:\s*(\d+)', raw)
+        if m: result["sold"] = count(m.group(1))
+
+    # Ищем в тексте
+    for tag in soup(["script", "style"]): tag.decompose()
+    page_text = soup.get_text(" ", strip=True)
     
+    if result["seller_views"] is None:
+        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+        if m: result["seller_views"] = count(m.group(1))
+    
+    if result["reviews"] is None:
+        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+        if m: result["reviews"] = count(m.group(1))
+    
+    if result["sold"] is None:
+        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+        if m: result["sold"] = count(m.group(1))
+
+    if result["rating"] is None:
+        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+        if m: result["rating"] = number(m.group(1))
+
     return result
 
 def update_filters(current, text):
@@ -336,7 +357,7 @@ class Reader:
             return raw, url
         raise SourceError("Слишком много перенаправлений.")
 
-    async def enrich(self, ad, chat):
+    async def enrich(self, ad):
         raw, final = await self.get(ad["url"])
         if urlsplit(final).hostname != urlsplit(ad["url"]).hostname: raise SourceError("Объявление перенаправило на другую страну.")
         ad["url"] = final
@@ -348,12 +369,9 @@ class Reader:
             cached = self.cache.get(url)
             if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
-                country = urlsplit(url).hostname.split('.')[0]
                 try:
-                    profile = await parse_profile_via_api(self.http, ad["seller_id"], country)
-                    if not profile["seller_views"]:  # Fallback if API fails
-                        raw_prof, _ = await self.get(url)
-                        profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
+                    raw_prof, _ = await self.get(url)
+                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
                 except RateLimit: raise
                 except (SourceError, ValueError): profile = None
                 self.cache[url] = (time.monotonic() + 300, profile)
@@ -553,7 +571,7 @@ class Service:
                                 
                             checked += 1
                             try:
-                                ad, warning = await self.reader.enrich(ad, chat)
+                                ad, warning = await self.reader.enrich(ad)
                                 if warning: warnings.add(warning)
                             except (SourceError, ValueError) as exc:
                                 errors += 1
