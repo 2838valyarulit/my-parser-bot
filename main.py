@@ -22,15 +22,15 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Импорт клиента OpenSooq для обхода защиты и получения просмотров
+# Пытаемся импортировать клиент OpenSooq для подсчета объявлений
 try:
-    from opensooq_mcp.opensooq_client import OpenSooqClient
+    import opensooq_client as oc
 except ImportError:
-    OpenSooqClient = None
+    oc = None
 
 COUNTRIES = "kw ae bh sa".split()
 HOSTS = {"opensooq.com", "www.opensooq.com"} | {c + ".opensooq.com" for c in COUNTRIES}
-METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "sold", "photos"}
+METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "sold", "photos", "listings_count"}
 MAX_PAGES, MAX_ADS, MAX_SEND = 20, 1000, 200
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
@@ -218,23 +218,58 @@ def parse_listing(raw, ad):
     ad["time"] = time_str or "Неизвестно"
     return ad
 
-# --- ФУНКЦИЯ ПОЛУЧЕНИЯ ПРОФИЛЯ ЧЕРЕЗ API (OPENSOOQ-MCP) ---
-async def get_profile_via_api(client, seller_id):
-    if not seller_id: return None
+def parse_profile(raw, expected_id):
+    soup = BeautifulSoup(raw, "html.parser")
+    result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None, "listings_count": None}
+    
     try:
-        # Используем клиент OpenSooq для получения статистики
-        items, meta = await client.fetch_member_listings(seller_id, page=1)
-        # В meta обычно лежит общая статистика, включая просмотры и продажи
-        if meta:
-            return {
-                "seller_views": count(meta.get("profile_views") or meta.get("views_count")),
-                "sold": count(meta.get("sold_listings_count") or meta.get("sold")),
-                "rating": number(meta.get("rating_avg")),
-                "ratings": count(meta.get("rating_count")),
-                "reviews": count(meta.get("reviews_count")),
-            }
+        data = props(soup)
+        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
+        if isinstance(mem, dict):
+            rat = mem.get("rating") or {}
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            result["reviews"] = count(rat.get("number_of_reviews"))
+            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
+            
+            info = mem.get("member_info") or {}
+            if "sold_listings_count" in info:
+                result["sold"] = count(info["sold_listings_count"])
+    except Exception:
+        pass
+
+    for tag in soup(["script", "style"]): tag.decompose()
+    page_text = soup.get_text(" ", strip=True)
+    
+    if result["seller_views"] is None:
+        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+        if m: result["seller_views"] = count(m.group(1))
+    
+    if result["reviews"] is None:
+        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+        if m: result["reviews"] = count(m.group(1))
+    
+    if result["sold"] is None:
+        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+        if m: result["sold"] = count(m.group(1))
+
+    if result["rating"] is None:
+        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+        if m: result["rating"] = number(m.group(1))
+
+    return result
+
+# --- НОВАЯ ФУНКЦИЯ: ПОДСЧЕТ ОБЪЯВЛЕНИЙ ЧЕРЕЗ API ---
+async def get_seller_listings_count(seller_id):
+    if not oc or not seller_id:
+        return None
+    try:
+        # fetch_member_listings возвращает (items, meta), где в meta есть общее количество
+        items, meta = await oc.fetch_member_listings(str(seller_id), page=1)
+        if meta and "count" in meta:
+            return count(meta["count"])
     except Exception as e:
-        log.error(f"OpenSooq API error for {seller_id}: {e}")
+        log.warning(f"Не удалось получить количество объявлений для {seller_id}: {e}")
     return None
 
 def update_filters(current, text):
@@ -287,7 +322,6 @@ class Reader:
         self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, headers={"User-Agent": "OpenSooqTelegramBot/1.0", "Accept-Language": "en"})
         self.lock = asyncio.Lock()
         self.last, self.pauses, self.cache = 0.0, {}, {}
-        self.opensooq_client = OpenSooqClient() if OpenSooqClient else None
 
     async def get(self, url):
         url = safe_url(url)
@@ -338,15 +372,29 @@ class Reader:
         ad = await asyncio.to_thread(parse_listing, raw, ad)
         warning = ""
         
-        if self.opensooq_client and ad.get("seller_id"):
-            profile = await get_profile_via_api(self.opensooq_client, ad["seller_id"])
-            if profile:
-                ad.update({key: value for key, value in profile.items() if value is not None})
+        url = ad.get("seller_url")
+        if url:
+            cached = self.cache.get(url)
+            if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
-                warning = "API не вернул профиль."
-        else:
-            warning = "API клиент не инициализирован."
+                try:
+                    raw_prof, _ = await self.get(url)
+                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
+                except RateLimit: raise
+                except (SourceError, ValueError): profile = None
+                self.cache[url] = (time.monotonic() + 300, profile)
             
+            if profile is not None: ad.update({key: value for key, value in profile.items() if value is not None})
+            else: warning = "Часть профилей недоступна."
+            
+        if ad.get("seller_id"):
+            count_listings = await get_seller_listings_count(ad["seller_id"])
+            if count_listings is not None:
+                ad["listings_count"] = count_listings
+            
+        if len(self.cache) > 2000:
+            self.cache = {key: value for key, value in self.cache.items() if value[0] > time.monotonic()}
+            self.cache = dict(list(self.cache.items())[-1000:])
         return ad, warning
 
 def card(ad):
@@ -387,7 +435,8 @@ def card(ad):
         f"• <b>Рейтинг:</b> {show('rating')} (Оценок: {show('ratings')})\n"
         f"• <b>Отзывов:</b> {show('reviews')}\n"
         f"• <b>Продано:</b> {show('sold')}\n"
-        f"• <b>Просмотры профиля:</b> ≈ {show('seller_views')}"
+        f"• <b>Просмотры профиля:</b> ≈ {show('seller_views')}\n"
+        f"• <b>Активных объявлений:</b> {show('listings_count')}"
     )
     return full_text
 
@@ -615,10 +664,6 @@ class Service:
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.reader.http.aclose()
-        if self.reader.opensooq_client:
-            # Если у клиента есть метод close, закрываем его
-            if hasattr(self.reader.opensooq_client, 'close'):
-                await self.reader.opensooq_client.close()
         self.db.close()
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
