@@ -216,7 +216,7 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Попытка вытащить из JSON (самый надежный, но иногда его нет)
+    # 1. Ищем JSON
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
@@ -226,24 +226,23 @@ def parse_profile(raw, expected_id):
             result["ratings"] = count(rat.get("number_of_rating"))
             result["reviews"] = count(rat.get("number_of_reviews"))
             result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
-            
             info = mem.get("member_info") or {}
-            if "sold_listings_count" in info:
-                result["sold"] = count(info["sold_listings_count"])
+            if "sold_listings_count" in info: result["sold"] = count(info["sold_listings_count"])
     except Exception:
         pass
 
-    # 2. Поиск по всему сырому HTML (обходит JS-скрипты)
+    # 2. Ищем в сыром HTML любые упоминания просмотров
     if result["seller_views"] is None:
-        # Ищем паттерн "views_count":21400 или "views": "21.4K"
-        m = re.search(r'"(?:views_count|views)"\s*:\s*"?(\d+[\d\.,]*[kKmM]?)"?', raw)
-        if m: result["seller_views"] = count(m.group(1))
-    
-    # 3. Поиск по тексту страницы (если он отрендерился)
+        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?']:
+            m = re.search(pattern, raw, re.I)
+            if m: result["seller_views"] = count(m.group(1)); break
+
+    # 3. Ищем в тексте
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
     if result["seller_views"] is None:
+        # Ловим "21.4K Views" или просто "21.4K" рядом с иконкой глаза
         m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
         if m: result["seller_views"] = count(m.group(1))
     
@@ -595,7 +594,6 @@ class Service:
             
             header = "✅ <b>Вы получили все сообщения.</b>"
             
-            # Более минималистичный дизайн
             dashboard = (
                 f"📊 <b>Отчет о парсинге</b>\n\n"
                 f"✅ Найдено новых: <b>{sent}</b>\n"
@@ -619,7 +617,18 @@ class Service:
             await telegram_call(self.bot.send_message, chat_id=chat, text=header, parse_mode="HTML")
             await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
                 
-        except asyncio.CancelledError: raise
+        except asyncio.CancelledError:
+            # Если парсинг отменили вручную через /pause
+            duration = round(time.time() - start_time)
+            dashboard = (
+                f"🛑 <b>Парсинг остановлен вручную</b>\n\n"
+                f"✅ Найдено новых: <b>{sent}</b>\n"
+                f"⏱ Время: {duration} сек.\n"
+                f"👀 Всего обработано: {checked} шт."
+            )
+            with suppress(TelegramError):
+                await self.bot.send_message(chat_id=chat, text=dashboard, parse_mode="HTML")
+            raise
         except Forbidden: self.save(chat, enabled=0)
         except Exception as exc:
             log.error("Проверка прервана: %s", type(exc).__name__)
