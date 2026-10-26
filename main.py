@@ -216,7 +216,7 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Ищем JSON
+    # 1. Ищем JSON (самый надежный, если он есть на странице)
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
@@ -231,18 +231,22 @@ def parse_profile(raw, expected_id):
     except Exception:
         pass
 
-    # 2. Ищем в сыром HTML любые упоминания просмотров
+    # 2. Ищем в сыром HTML (обходит JS-скрипты, ищет по всему файлу)
     if result["seller_views"] is None:
-        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?']:
+        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?', r'([\d\.,]+[kKmM]?)\s*Views']:
             m = re.search(pattern, raw, re.I)
             if m: result["seller_views"] = count(m.group(1)); break
 
-    # 3. Ищем в тексте
+    if result["sold"] is None:
+        for pattern in [r'"sold_listings_count"\s*:\s*(\d+)', r'"sold"\s*:\s*(\d+)', r'Sold\s+Listings?\s*\((\d+)\)']:
+            m = re.search(pattern, raw, re.I)
+            if m: result["sold"] = count(m.group(1)); break
+
+    # 3. Ищем в видимом тексте страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
     if result["seller_views"] is None:
-        # Ловим "21.4K Views" или просто "21.4K" рядом с иконкой глаза
         m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
         if m: result["seller_views"] = count(m.group(1))
     
@@ -389,6 +393,10 @@ def card(ad):
 
     loc = ad.get('location', 'Не указана')
     desc = ad.get('description', '').strip()
+    
+    # Очистка от технических скрытых тегов
+    desc = re.sub(r'\{.*?\}', '', desc) 
+    
     if desc.startswith("{'") or desc.startswith('{"'):
         try:
             import ast
