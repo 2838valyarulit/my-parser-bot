@@ -1,4 +1,4 @@
-"""OpenSooq -> Telegram (С кнопками)."""
+"""OpenSooq -> Telegram (Только товары + кнопки)."""
 import asyncio
 import json
 import logging
@@ -29,6 +29,9 @@ METRICS = {"price", "views", "seller_views", "rating", "ratings", "reviews", "so
 MAX_PAGES, MAX_ADS, MAX_SEND = 2, 60, 20
 CDN = "https://opensooq-imagesv2.os-cdn.com/previews/700x0/"
 log = logging.getLogger("opensooq")
+
+# Стоп-слова для категорий (чтобы бот не парсил машины, квартиры и услуги)
+EXCLUDED_TAGS = {"Cars", "Autos", "Cars For Sale", "Real Estate", "Apartments", "Services", "Delivery", "Jobs", "Rent"}
 
 def generate_password(length=8):
     chars = string.ascii_letters + string.digits
@@ -134,6 +137,11 @@ def parse_category(raw, url):
     ads = []
     for row in block["items"]:
         if (not isinstance(row, dict) or not row.get("id") or not row.get("title")): continue
+        
+        # Проверка на стоп-слова (машины, квартиры, услуги)
+        tags = set(row.get("tags", []))
+        if tags & EXCLUDED_TAGS: continue
+
         path = row.get("post_url") or f"/search/{row['id']}"
         if path.startswith("/search/"):
             locale = urlsplit(url).path.split("/")[1]
@@ -186,8 +194,19 @@ def parse_profile(raw, expected_id):
     if (not isinstance(member, dict) or str(member.get("id")) != expected_id): member = member if isinstance(member, dict) else {}
     rating = member.get("rating") or {}
     result = {"rating": number(rating.get("average_rating")), "ratings": count(rating.get("number_of_rating")), "reviews": count(rating.get("number_of_reviews")), "seller_views": count(member.get("views_count")), "sold": None}
+    
+    # Пытаемся вытащить просмотры из JSON, если их нет в тексте
+    if result["seller_views"] is None:
+        for obj in walk([data]):
+            if isinstance(obj, dict) and "views" in obj:
+                val = count(obj["views"])
+                if val is not None:
+                    result["seller_views"] = val
+                    break
+
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
+    
     if result["seller_views"] is None:
         match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
         if match_views: result["seller_views"] = count(match_views.group(1))
