@@ -233,7 +233,7 @@ def parse_profile(raw, expected_id):
     except Exception:
         pass
 
-    # 2. Поиск в сыром HTML (даже если данные сгенерированы JS)
+    # 2. Поиск в сыром HTML (GraphQL скрипты)
     if result["seller_views"] is None:
         for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?']:
             m = re.search(pattern, raw, re.I)
@@ -395,7 +395,8 @@ def card(ad):
 
     loc = ad.get('location', 'Не указана')
     desc = ad.get('description', '').strip()
-    desc = re.sub(r'\{.*?\}', '', desc) 
+    # Очистка от мусора вида {'type': 'phone'...}
+    desc = re.sub(r'\{[^{}]*\}', '', desc).strip()
     
     if desc.startswith("{'") or desc.startswith('{"'):
         try:
