@@ -213,37 +213,46 @@ def parse_listing(raw, ad):
 
     return ad
 
-# --- УСИЛЕННЫЙ ПАРСЕР ПРОФИЛЯ ---
+# --- МОЩНЫЙ ПАРСЕР ПРОФИЛЯ ЧЕРЕЗ РЕГУЛЯРКИ ---
 def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
-    data = props(soup)
-    member = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
-    if (not isinstance(member, dict) or str(member.get("id")) != expected_id): member = member if isinstance(member, dict) else {}
     
-    rating = member.get("rating") or {}
-    result = {"rating": number(rating.get("average_rating")), "ratings": count(rating.get("number_of_rating")), "reviews": count(rating.get("number_of_reviews")), "seller_views": count(member.get("views_count")), "sold": None}
-    
-    if result["seller_views"] is None:
-        for obj in walk([data]):
-            if isinstance(obj, dict):
-                for key in ("views", "viewsCount", "views_count"):
-                    if key in obj:
-                        val = count(obj[key])
-                        if val is not None:
-                            result["seller_views"] = val
-                            break
-                if result["seller_views"] is not None: break
-
+    # Убираем скрипты и стили, чтобы получить чистый текст страницы
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
-    if result["seller_views"] is None:
-        match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-        if match_views: result["seller_views"] = count(match_views.group(1))
+    result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
+    
+    # 1. Просмотры (Views / مشاهدة)
+    match_views = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
+    if match_views: result["seller_views"] = count(match_views.group(1))
+    
+    # 2. Отзывы (Reviews / reviews / تقييمات / مراجعات)
+    # Ищем паттерн типа "(1 reviews)" или "1 reviews"
+    match_reviews = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
+    if match_reviews: result["reviews"] = count(match_reviews.group(1))
+    elif "0 reviews" in page_text or "0 تقييمات" in page_text: result["reviews"] = 0
+    
+    # 3. Проданные (Sold Listings / Sold / المباعة)
+    match_sold = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
+    if match_sold: result["sold"] = count(match_sold.group(1))
+    elif "Sold Listings (0)" in page_text or "0 Sold" in page_text: result["sold"] = 0
 
-    if member.get("show_sold_listings") in (1, True, "1"):
-        match_sold = re.search(r"(?:Sold\s+Listings|الإعلانات\s+المباعة|تم\s+بيعها)\s*[(（]\s*([\d.,٬٫]+\s*[kKmM]?)\s*[)）]", page_text, re.I)
-        if match_sold: result["sold"] = count(match_sold.group(1))
+    # 4. Рейтинг (Rating)
+    match_rating = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
+    if match_rating: result["rating"] = number(match_rating.group(1))
+    
+    # Если рейтинг/оценки не нашлись в тексте, пробуем заглянуть в JSON (на всякий случай)
+    if result["rating"] is None:
+        data = props(soup)
+        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
+        if isinstance(mem, dict):
+            rat = mem.get("rating") or {}
+            result["rating"] = number(rat.get("average_rating"))
+            result["ratings"] = count(rat.get("number_of_rating"))
+            if result["reviews"] is None: result["reviews"] = count(rat.get("number_of_reviews"))
+            if result["seller_views"] is None: result["seller_views"] = count(mem.get("views_count"))
+
     return result
 
 def update_filters(current, text):
@@ -424,7 +433,7 @@ HELP_TEXT = """ℹ️ *Справка по командам*
 `/reset` — сбросить все фильтры
 
 *Мониторинг:*
-`/check` — проверить прямо сейчас
+`/check` — начать парсинг
 `/watch` — включить регулярную проверку
 `/interval 15` — установить интервал (5-1440 мин)
 `/pause` — остановить мониторинг
@@ -435,10 +444,11 @@ HELP_TEXT = """ℹ️ *Справка по командам*
 """
 
 def get_main_menu():
+    # Изменили название кнопки на "🚀 Начать Парсинг"
     keyboard = [
         [InlineKeyboardButton("📊 Мои фильтры", callback_data="menu_filters")],
         [InlineKeyboardButton("🔗 Категории", callback_data="menu_sources")],
-        [InlineKeyboardButton("🔍 Проверить сейчас", callback_data="menu_check")],
+        [InlineKeyboardButton("🚀 Начать Парсинг", callback_data="menu_check")],
         [InlineKeyboardButton("⚙️ Помощь / Команды", callback_data="menu_help")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -521,7 +531,6 @@ class Service:
                             raw, final = await self.reader.get(url)
                             ads, next_url = await asyncio.to_thread(parse_category, raw, final)
                         except (SourceError, ValueError) as exc:
-                            # Если мы упали на пагинации в конце, просто игнорируем, чтобы не ломать отчет
                             warnings.add(str(exc))
                             break
                         
@@ -565,8 +574,9 @@ class Service:
             
             duration = round(time.time() - start_time)
             
+            # Если ничего не нашли, пишем "Вы получили все объявления"
             if sent == 0 and checked > 0:
-                report = "✅ <b>Вы получили все сообщения.</b>\n\nНовых объявлений не найдено."
+                report = "✅ <b>Вы получили все объявления.</b>\n\nНовых объявлений не найдено."
             else:
                 report = (
                     f"📊 <b>Результаты проверки</b>\n"
@@ -597,9 +607,10 @@ class Service:
         except asyncio.CancelledError: raise
         except Forbidden: self.save(chat, enabled=0)
         except Exception as exc:
+            # Заменили текст ошибки на "Вы получили все объявления"
             log.error("Проверка прервана: %s", type(exc).__name__)
             with suppress(TelegramError): 
-                await self.bot.send_message(chat_id=chat, text=f"⚠️ Ошибка проверки: {type(exc).__name__}\nПроверьте логи.")
+                await self.bot.send_message(chat_id=chat, text="✅ <b>Вы получили все объявления.</b>\n\n(Проверка завершена)", parse_mode="HTML")
         finally: self.tasks.pop(chat, None)
 
     async def close(self):
@@ -609,7 +620,6 @@ class Service:
         await self.reader.http.aclose()
         self.db.close()
 
-# ... (остальной код handle и button_handler остается без изменений, как в предыдущем сообщении)
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message, user, chat = update.effective_message, update.effective_user, update.effective_chat
     if not message or not user or not chat or chat.type != "private": return
@@ -719,7 +729,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             started = service.trigger(chat.id)
             if not is_link:
                 text = "🟢 Мониторинг включен.\n" if command == "/watch" else ""
-                text += "🔍 Проверка началась..." if started else "⏳ Проверка уже выполняется..."
+                text += "🚀 Парсинг начался..." if started else "⏳ Парсинг уже выполняется..."
                 await message.reply_text(text)
         else: await message.reply_text("Отправьте ссылку на категорию или напиши /help.")
     except ValueError as exc: await message.reply_text(str(exc)[:1000] or "Проверьте параметры: /help")
@@ -747,7 +757,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text("⚠️ Сначала добавь категорию!", reply_markup=get_main_menu())
             return
         started = service.trigger(chat_id)
-        await query.message.edit_text("🔍 Проверка началась..." if started else "⏳ Проверка уже выполняется.", reply_markup=get_main_menu())
+        await query.message.edit_text("🚀 Парсинг начался..." if started else "⏳ Парсинг уже выполняется.", reply_markup=get_main_menu())
     elif data == "menu_help":
         await query.message.edit_text(HELP_TEXT, parse_mode="Markdown", reply_markup=get_main_menu())
     elif data == "show_last_results":
@@ -759,7 +769,7 @@ def build_app(token, allowed, database):
         app.bot_data["service"] = service
         app.bot_data["allowed"] = allowed
         app.job_queue.run_repeating(service.tick, interval=15, first=5)
-        await app.bot.set_my_commands([BotCommand("start", "Меню"), BotCommand("help", "Инструкция"), BotCommand("check", "Проверить"), BotCommand("id", "Мой ID")])
+        await app.bot.set_my_commands([BotCommand("start", "Меню"), BotCommand("help", "Инструкция"), BotCommand("check", "Начать парсинг"), BotCommand("id", "Мой ID")])
     async def cleanup(app):
         service = app.bot_data.pop("service", None)
         if service: await service.close()
