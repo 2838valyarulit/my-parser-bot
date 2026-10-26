@@ -1,4 +1,3 @@
-"""OpenSooq -> Telegram."""
 import asyncio
 import json
 import logging
@@ -9,7 +8,6 @@ import re
 import shlex
 import sqlite3
 import string
-import threading
 import time
 import unicodedata
 from contextlib import suppress
@@ -20,7 +18,6 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from flask import Flask
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -581,27 +578,15 @@ def build_app(token, allowed, database):
     app.add_error_handler(on_error)
     return app
 
-# --- ЗАПУСК БОТА + FLASK (для Render) ---
-flask_app = Flask(__name__)
-@flask_app.route('/')
-def health(): return "Bot is running", 200
-
-def run_bot_thread():
-    token = os.getenv("BOT_TOKEN", "").strip()
-    admin_id_str = os.getenv("ALLOWED_TELEGRAM_IDS", "")
-    allowed = {int(v.strip()) for v in admin_id_str.split(",") if v.strip()}
-    app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
-    app.run_polling(allowed_updates=["message"])
-
-def main():
+if __name__ == "__main__":
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    threading.Thread(target=run_bot_thread, daemon=True).start()
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Запуск Flask на порту {port}...")
-    flask_app.run(host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
-    main()
+    
+    token = os.getenv("BOT_TOKEN", "").strip()
+    admin_id_str = os.getenv("ALLOWED_TELEGRAM_IDS", "")
+    allowed = {int(v.strip()) for v in admin_id_str.split(",") if v.strip()}
+    
+    app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
+    app.run_polling(allowed_updates=["message"])
