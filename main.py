@@ -249,6 +249,7 @@ def parse_profile(raw, expected_id):
         match_sold = re.search(r"(?:Sold\s+Listings|الإعلانات\s+المباعة|تم\s+بيعها)\s*[(（]\s*([\d.,٬٫]+\s*[kKmM]?)\s*[)）]", page_text, re.I)
         if match_sold: result["sold"] = count(match_sold.group(1))
     return result
+
 def update_filters(current, text):
     result = dict(current)
     for pair in shlex.split(text):
@@ -366,17 +367,48 @@ class Reader:
             self.cache = dict(list(self.cache.items())[-1000:])
         return ad, warning
 
+# --- НОВАЯ ФУНКЦИЯ ДИЗАЙНА ---
 def card(ad):
+    """Формирует две части текста: основную и детали с описанием."""
     def show(key):
         value = ad.get(key)
         if value is None: return "нет данных"
         if isinstance(value, float): return f"{value:g}"
         return str(value)
+
+    # Первая часть (пойдет в подпись к фото)
+    # Если локации нет в парсере, выведется "Не указана"
+    loc = ad.get('location', 'Не указана')
     
-    time_info = f"⏱ Опубликовано: {show('time')}\n" if ad.get('time') else ""
+    main_text = (
+        f"<b>Объявление №{show('id')}</b>\n\n"
+        f"📺 <b>{ad['title'][:100]}</b>\n"
+        f"🏷️ <b>Цена:</b> {show('price')} {ad.get('currency', '')}\n"
+        f"📍 <b>Локация:</b> {loc}"
+    )
+
+    # Вторая часть (пойдет отдельным сообщением)
+    desc = ad.get('description', 'Без описания').strip()
+    if not desc: desc = "Без описания"
+    if len(desc) > 800: desc = desc[:800] + "..."
     
-    text = f"🛍 *{ad['title'][:100]}*\n\n💰 Цена: {show('price')} {ad.get('currency', '')}\n📷 Фото: {show('photos')}\n👁 Просмотры: {show('views')}\n{time_info}\n👤 *Продавец:* {ad.get('seller_name', '')[:50] or 'нет данных'}\n⭐ Рейтинг: {show('rating')}\nОценок: {show('ratings')}\nОтзывов: {show('reviews')}\nПродано: {show('sold')}\nПросмотры профиля ≈ {show('seller_views')}"
-    return text.encode("utf-16-le")[:1990].decode("utf-16-le", errors="ignore")
+    time_info = f"• <b>Опубликовано:</b> {show('time')}\n" if ad.get('time') else ""
+    
+    details_text = (
+        f"📖 <b>Описание:</b>\n"
+        f"<blockquote>{desc}</blockquote>\n\n"
+        f"💼 <b>Продавец:</b> {ad.get('seller_name', 'Неизвестен')[:50]}\n\n"
+        f"📝 <b>Детали:</b>\n"
+        f"• <b>Просмотры:</b> {show('views')}\n"
+        f"• <b>Фото:</b> {show('photos')}\n"
+        f"{time_info}"
+        f"• <b>Рейтинг:</b> {show('rating')} (Оценок: {show('ratings')})\n"
+        f"• <b>Отзывов:</b> {show('reviews')}\n"
+        f"• <b>Продано:</b> {show('sold')}\n"
+        f"• <b>Просмотры профиля:</b> ≈ {show('seller_views')}"
+    )
+    
+    return main_text, details_text
 
 async def telegram_call(method, **kwargs):
     try: return await method(**kwargs)
@@ -464,16 +496,59 @@ class Service:
             task.cancel()
             with suppress(asyncio.CancelledError): await task
 
+    # --- НОВЫЙ МЕТОД ОТПРАВКИ ---
     async def send(self, chat, ad):
-        buttons = [[InlineKeyboardButton("Объявление и все фото", url=ad["url"])]]
-        if ad.get("seller_url"): buttons.append([InlineKeyboardButton("Продавец", url=ad["seller_url"])])
-        kwargs = {"chat_id": chat, "reply_markup": InlineKeyboardMarkup(buttons)}
+        # Собираем кнопки
+        buttons = []
+        if ad.get("url"):
+            buttons.append([InlineKeyboardButton("🔗 Ссылка на товар", url=ad["url"])])
+        if ad.get("seller_url"):
+            buttons.append([InlineKeyboardButton("✉️ Профиль продавца", url=ad["seller_url"])])
+        
+        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+        # Получаем две части текста из новой функции card()
+        main_text, details_text = card(ad)
+        
+        # 1. Отправляем фото с основной инфой и кнопками
         if ad.get("images"):
             try:
-                await telegram_call(self.bot.send_photo, photo=ad["images"][0], caption=card(ad), parse_mode="Markdown", **kwargs)
-                return
-            except BadRequest: pass
-        await telegram_call(self.bot.send_message, text=card(ad), parse_mode="Markdown", **kwargs)
+                await telegram_call(
+                    self.bot.send_photo, 
+                    chat_id=chat, 
+                    photo=ad["images"][0], 
+                    caption=main_text, 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
+            except BadRequest:
+                # Если фото битое, отправляем просто текст
+                await telegram_call(
+                    self.bot.send_message, 
+                    chat_id=chat, 
+                    text=main_text, 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
+        else:
+            await telegram_call(
+                self.bot.send_message, 
+                chat_id=chat, 
+                text=main_text, 
+                parse_mode="HTML", 
+                reply_markup=reply_markup
+            )
+
+        # Небольшая пауза, чтобы сообщения не слипались в одно
+        await asyncio.sleep(0.5)
+
+        # 2. Отправляем детали и описание (без кнопок)
+        await telegram_call(
+            self.bot.send_message, 
+            chat_id=chat, 
+            text=details_text, 
+            parse_mode="HTML"
+        )
 
     async def scan(self, chat, notify):
         checked, sent, errors, skipped = 0, 0, 0, 0
