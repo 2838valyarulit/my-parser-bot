@@ -212,47 +212,36 @@ def parse_listing(raw, ad):
     ad["time"] = time_str or "Неизвестно"
     return ad
 
-def parse_profile(raw, expected_id):
-    soup = BeautifulSoup(raw, "html.parser")
+async def parse_profile_via_graphql(client, seller_id):
+    # Прямой запрос к скрытому GraphQL API OpenSooq
+    url = "https://api.opensooq.com/graphql"
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # Запрос на получение статистики профиля (просмотры, продано)
+    query = """
+    query GetProfileStats($id: ID!) {
+      member(id: $id) {
+        memberStats {
+          profileViews
+        }
+        inventoryStats {
+          soldCount
+        }
+      }
+    }
+    """
+    
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
-    
-    # 1. Поиск в точном JSON пуле
     try:
-        data = props(soup)
-        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
-        if isinstance(mem, dict):
-            # Рейтинг и отзывы
-            rat = mem.get("rating") or {}
-            result["rating"] = number(rat.get("average_rating"))
-            result["ratings"] = count(rat.get("number_of_rating"))
-            result["reviews"] = count(rat.get("number_of_reviews"))
-            
-            # ТОЧНЫЙ ПУТЬ ДЛЯ ПРОСМОТРОВ
-            stats = mem.get("memberStats") or {}
-            result["seller_views"] = count(stats.get("profileViews") or mem.get("views_count") or mem.get("views"))
-            
-            # ТОЧНЫЙ ПУТЬ ДЛЯ ПРОДАННЫХ
-            sold_stats = mem.get("inventoryStats") or {}
-            result["sold"] = count(sold_stats.get("soldCount") or (mem.get("member_info") or {}).get("sold_listings_count"))
-    except Exception:
-        pass
-
-    # 2. Поиск в тексте, если JSON не помог
-    for tag in soup(["script", "style"]): tag.decompose()
-    page_text = soup.get_text(" ", strip=True)
-    
-    if result["seller_views"] is None:
-        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-        if m: result["seller_views"] = count(m.group(1))
-    
-    if result["reviews"] is None:
-        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
-        if m: result["reviews"] = count(m.group(1))
-    
-    if result["sold"] is None:
-        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
-        if m: result["sold"] = count(m.group(1))
-
+        r = await client.post(url, json={"query": query, "variables": {"id": str(seller_id)}}, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data and "member" in data["data"]:
+                mem = data["data"]["member"]
+                if mem.get("memberStats"): result["seller_views"] = count(mem["memberStats"].get("profileViews"))
+                if mem.get("inventoryStats"): result["sold"] = count(mem["inventoryStats"].get("soldCount"))
+    except Exception as e:
+        log.warning(f"GraphQL failed for {seller_id}: {e}")
     return result
 
 def update_filters(current, text):
@@ -361,8 +350,10 @@ class Reader:
             if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
                 try:
-                    raw_prof, _ = await self.get(url)
-                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
+                    profile = await parse_profile_via_graphql(self.http, ad["seller_id"])
+                    if not profile["seller_views"]:
+                        raw_prof, _ = await self.get(url)
+                        profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
                 except RateLimit: raise
                 except (SourceError, ValueError): profile = None
                 self.cache[url] = (time.monotonic() + 300, profile)
@@ -384,7 +375,6 @@ def card(ad):
 
     loc = ad.get('location', 'Не указана')
     desc = ad.get('description', '').strip()
-    # Очистка от технического мусора
     desc = re.sub(r'\{[^{}]*\}', '', desc).strip()
     
     if desc.startswith("{'") or desc.startswith('{"'):
