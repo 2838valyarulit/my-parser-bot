@@ -212,56 +212,35 @@ def parse_listing(raw, ad):
     ad["time"] = time_str or "Неизвестно"
     return ad
 
-def parse_profile(raw, expected_id):
-    soup = BeautifulSoup(raw, "html.parser")
+async def parse_profile_via_api(client, seller_id, country_code):
+    # Прямой запрос к скрытому API OpenSooq
+    url = f"https://api.opensooq.com/v1/user/{seller_id}/profile"
+    headers = {"Accept": "application/json", "User-Agent": "OpenSooqTelegramBot/1.0"}
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Ищем JSON (самый надежный, если он есть на странице)
     try:
-        data = props(soup)
-        mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
-        if isinstance(mem, dict):
-            rat = mem.get("rating") or {}
-            result["rating"] = number(rat.get("average_rating"))
-            result["ratings"] = count(rat.get("number_of_rating"))
-            result["reviews"] = count(rat.get("number_of_reviews"))
-            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
-            info = mem.get("member_info") or {}
-            if "sold_listings_count" in info: result["sold"] = count(info["sold_listings_count"])
-    except Exception:
-        pass
-
-    # 2. Ищем в сыром HTML (обходит JS-скрипты, ищет по всему файлу)
-    if result["seller_views"] is None:
-        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?', r'([\d\.,]+[kKmM]?)\s*Views']:
-            m = re.search(pattern, raw, re.I)
-            if m: result["seller_views"] = count(m.group(1)); break
-
-    if result["sold"] is None:
-        for pattern in [r'"sold_listings_count"\s*:\s*(\d+)', r'"sold"\s*:\s*(\d+)', r'Sold\s+Listings?\s*\((\d+)\)']:
-            m = re.search(pattern, raw, re.I)
-            if m: result["sold"] = count(m.group(1)); break
-
-    # 3. Ищем в видимом тексте страницы
-    for tag in soup(["script", "style"]): tag.decompose()
-    page_text = soup.get_text(" ", strip=True)
+        r = await client.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            # Пытаемся найти нужные ключи в ответе API
+            member = data.get("data", {}).get("member", {})
+            if not member: member = data.get("member", {})
+            
+            if member:
+                rating = member.get("rating", {})
+                result["rating"] = number(rating.get("average_rating"))
+                result["ratings"] = count(rating.get("number_of_rating"))
+                result["reviews"] = count(rating.get("number_of_reviews"))
+                
+                # Просмотры и продано (ключи могут отличаться)
+                result["seller_views"] = count(member.get("views_count") or member.get("views") or member.get("total_views"))
+                
+                # Ищем Sold
+                for key in ("sold_listings", "sold_listings_count", "sold"):
+                    if key in member: result["sold"] = count(member[key]); break
+    except Exception as e:
+        log.warning(f"API profile failed for {seller_id}: {e}")
     
-    if result["seller_views"] is None:
-        m = re.search(r"([\d.,٬٫]+\s*[kKmM]?)\s*(?:Views|مشاهدة|مشاهدات)", page_text, re.I)
-        if m: result["seller_views"] = count(m.group(1))
-    
-    if result["reviews"] is None:
-        m = re.search(r"(?:\(|^|\s)(\d+)\s*(?:reviews?|تقييمات|مراجعات)", page_text, re.I)
-        if m: result["reviews"] = count(m.group(1))
-    
-    if result["sold"] is None:
-        m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
-        if m: result["sold"] = count(m.group(1))
-
-    if result["rating"] is None:
-        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
-        if m: result["rating"] = number(m.group(1))
-
     return result
 
 def update_filters(current, text):
@@ -357,7 +336,7 @@ class Reader:
             return raw, url
         raise SourceError("Слишком много перенаправлений.")
 
-    async def enrich(self, ad):
+    async def enrich(self, ad, chat):
         raw, final = await self.get(ad["url"])
         if urlsplit(final).hostname != urlsplit(ad["url"]).hostname: raise SourceError("Объявление перенаправило на другую страну.")
         ad["url"] = final
@@ -369,9 +348,12 @@ class Reader:
             cached = self.cache.get(url)
             if cached and cached[0] > time.monotonic(): profile = cached[1]
             else:
+                country = urlsplit(url).hostname.split('.')[0]
                 try:
-                    raw_prof, _ = await self.get(url)
-                    profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
+                    profile = await parse_profile_via_api(self.http, ad["seller_id"], country)
+                    if not profile["seller_views"]:  # Fallback if API fails
+                        raw_prof, _ = await self.get(url)
+                        profile = await asyncio.to_thread(parse_profile, raw_prof, ad["seller_id"])
                 except RateLimit: raise
                 except (SourceError, ValueError): profile = None
                 self.cache[url] = (time.monotonic() + 300, profile)
@@ -393,8 +375,6 @@ def card(ad):
 
     loc = ad.get('location', 'Не указана')
     desc = ad.get('description', '').strip()
-    
-    # Очистка от технических скрытых тегов
     desc = re.sub(r'\{.*?\}', '', desc) 
     
     if desc.startswith("{'") or desc.startswith('{"'):
@@ -547,7 +527,7 @@ class Service:
                 for source in self.state(chat)["urls"]:
                     url, pages_seen = source, set()
                     for page_index in range(MAX_PAGES):
-                        if stop: break # Жесткая остановка при нахождении старого объявления
+                        if stop: break
                         if (url in pages_seen or source not in self.state(chat)["urls"]): break
                         pages_seen.add(url)
                         try:
@@ -564,7 +544,7 @@ class Service:
                             delivered = self.db.execute("SELECT 1 FROM delivered WHERE chat=? AND key=?", (chat, key)).fetchone()
                             if delivered:
                                 skipped += 1
-                                stop = True # Останавливаем весь парсинг, если нашли старое
+                                stop = True
                                 break
                             
                             if checked >= MAX_ADS or sent >= MAX_SEND:
@@ -573,7 +553,7 @@ class Service:
                                 
                             checked += 1
                             try:
-                                ad, warning = await self.reader.enrich(ad)
+                                ad, warning = await self.reader.enrich(ad, chat)
                                 if warning: warnings.add(warning)
                             except (SourceError, ValueError) as exc:
                                 errors += 1
@@ -626,7 +606,6 @@ class Service:
             await telegram_call(self.bot.send_message, chat_id=chat, text=dashboard, parse_mode="HTML", reply_markup=report_markup)
                 
         except asyncio.CancelledError:
-            # Если парсинг отменили вручную через /pause
             duration = round(time.time() - start_time)
             dashboard = (
                 f"🛑 <b>Парсинг остановлен вручную</b>\n\n"
@@ -744,7 +723,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             service.save(chat.id, minutes=minutes, next_check=time.time() + minutes * 60)
             await message.reply_text(f"⏱ Интервал установлен: {minutes} мин.")
         elif command in {"/pause", "/stop"}:
-            # Сначала отменяем задачу, чтобы не ждать лок
             task = service.tasks.get(chat.id)
             if task and not task.done():
                 task.cancel()
