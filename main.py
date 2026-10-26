@@ -216,35 +216,28 @@ def parse_profile(raw, expected_id):
     soup = BeautifulSoup(raw, "html.parser")
     result = {"rating": None, "ratings": None, "reviews": None, "seller_views": None, "sold": None}
     
-    # 1. Поиск в JSON (самый надежный, если он есть на странице)
+    # 1. Поиск в точном JSON пуле
     try:
         data = props(soup)
         mem = (data.get("userInfo", {}).get("member") or data.get("data", {}).get("info", {}).get("member"))
         if isinstance(mem, dict):
+            # Рейтинг и отзывы
             rat = mem.get("rating") or {}
             result["rating"] = number(rat.get("average_rating"))
             result["ratings"] = count(rat.get("number_of_rating"))
             result["reviews"] = count(rat.get("number_of_reviews"))
-            result["seller_views"] = count(mem.get("views_count") or mem.get("views"))
             
-            info = mem.get("member_info") or {}
-            if "sold_listings_count" in info:
-                result["sold"] = count(info["sold_listings_count"])
+            # ТОЧНЫЙ ПУТЬ ДЛЯ ПРОСМОТРОВ
+            stats = mem.get("memberStats") or {}
+            result["seller_views"] = count(stats.get("profileViews") or mem.get("views_count") or mem.get("views"))
+            
+            # ТОЧНЫЙ ПУТЬ ДЛЯ ПРОДАННЫХ
+            sold_stats = mem.get("inventoryStats") or {}
+            result["sold"] = count(sold_stats.get("soldCount") or (mem.get("member_info") or {}).get("sold_listings_count"))
     except Exception:
         pass
 
-    # 2. Поиск в сыром HTML (GraphQL скрипты)
-    if result["seller_views"] is None:
-        for pattern in [r'"total_views"\s*:\s*(\d+)', r'"view_count"\s*:\s*(\d+)', r'"views"\s*:\s*"?([\d\.,]+[kKmM]?)"?']:
-            m = re.search(pattern, raw, re.I)
-            if m: result["seller_views"] = count(m.group(1)); break
-
-    if result["sold"] is None:
-        for pattern in [r'"sold_listings_count"\s*:\s*(\d+)', r'"sold"\s*:\s*(\d+)', r'Sold\s+Listings?\s*\((\d+)\)']:
-            m = re.search(pattern, raw, re.I)
-            if m: result["sold"] = count(m.group(1)); break
-
-    # 3. Поиск в тексте страницы
+    # 2. Поиск в тексте, если JSON не помог
     for tag in soup(["script", "style"]): tag.decompose()
     page_text = soup.get_text(" ", strip=True)
     
@@ -259,10 +252,6 @@ def parse_profile(raw, expected_id):
     if result["sold"] is None:
         m = re.search(r"(?:Sold\s+Listings?|تم\s+بيعها|المباعة)[^\d]*(\d+)", page_text, re.I)
         if m: result["sold"] = count(m.group(1))
-
-    if result["rating"] is None:
-        m = re.search(r"(\d\.\d)\s*(?:★|stars?|نجوم)", page_text, re.I)
-        if m: result["rating"] = number(m.group(1))
 
     return result
 
@@ -395,7 +384,7 @@ def card(ad):
 
     loc = ad.get('location', 'Не указана')
     desc = ad.get('description', '').strip()
-    # Очистка от мусора вида {'type': 'phone'...}
+    # Очистка от технического мусора
     desc = re.sub(r'\{[^{}]*\}', '', desc).strip()
     
     if desc.startswith("{'") or desc.startswith('{"'):
