@@ -1264,4 +1264,140 @@ async def handle(update, context):
                 )
 
                 if re.search(
-                    r"/(?:search|lists)/\
+                    r"/(?:search|lists)/\d+",
+                    urlsplit(url).path,
+                ):
+                    raise ValueError(
+                        "Нужна ссылка на категорию."
+                    )
+
+                if url not in state["urls"]:
+                    if len(state["urls"]) >= 5:
+                        raise ValueError(
+                            "Максимум 5 категорий."
+                        )
+
+                    state["urls"].append(url)
+                    service.save(
+                        chat.id, urls=state["urls"]
+                    )
+
+            if not state["urls"]:
+                raise ValueError(
+                    "Сначала отправьте ссылку."
+                )
+
+            if command == "/watch":
+                service.save(chat.id, enabled=1)
+
+            started = service.trigger(chat.id)
+
+            text = (
+                "Мониторинг включён.\n"
+                if command == "/watch"
+                else ""
+            )
+            text += (
+                "Проверка началась. Остановка: /pause"
+                if started
+                else "Проверка уже выполняется."
+            )
+
+            await message.reply_text(text)
+
+        else:
+            await message.reply_text(
+                "Отправьте ссылку на категорию или /help."
+            )
+
+    except ValueError as exc:
+        await message.reply_text(
+            str(exc)[:1000] or "Проверьте параметры: /help"
+        )
+
+
+def build_app(token, allowed, database):
+    async def setup(app):
+        service = Service(app.bot, allowed, database)
+        app.bot_data["service"] = service
+
+        app.job_queue.run_repeating(
+            service.tick, interval=15, first=5,
+        )
+
+        await app.bot.set_my_commands([
+            BotCommand("start", "Начать"),
+            BotCommand("filters", "Фильтры"),
+            BotCommand("check", "Проверить сейчас"),
+            BotCommand("watch", "Мониторинг"),
+            BotCommand("pause", "Остановить"),
+            BotCommand("sources", "Категории"),
+            BotCommand("help", "Инструкция"),
+            BotCommand("id", "Мой Telegram ID"),
+        ])
+
+    async def cleanup(app):
+        service = app.bot_data.pop("service", None)
+        if service:
+            await service.close()
+
+    async def on_error(update, context):
+        log.error("Ошибка: %s", type(context.error).__name__)
+
+    app = (
+        Application.builder()
+        .token(token)
+        .concurrent_updates(False)
+        .post_init(setup)
+        .post_stop(cleanup)
+        .post_shutdown(cleanup)
+        .build()
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT, handle
+        )
+    )
+    app.add_error_handler(on_error)
+
+    return app
+
+
+# --- ЗАПУСК БОТА + FLASK (для Render) ---
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health():
+    return "Bot is running", 200
+
+def run_bot_thread():
+    token = os.getenv("BOT_TOKEN", "").strip()
+    allowed = {
+        int(v.strip())
+        for v in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",")
+        if v.strip()
+    }
+    app = build_app(token, allowed, os.getenv("DATABASE_PATH", "bot.sqlite3"))
+    app.run_polling(allowed_updates=["message"])
+
+def main():
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Запускаем бота в фоновом потоке
+    threading.Thread(target=run_bot_thread, daemon=True).start()
+
+    # Запускаем Flask (чтобы Render видел порт)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Запуск Flask на порту {port}...")
+    flask_app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    main()
